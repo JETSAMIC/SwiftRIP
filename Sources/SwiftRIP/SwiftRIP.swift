@@ -33,6 +33,13 @@ public enum SwiftRIP {
         try RIPParser.parse(text)
     }
 
+    /// Encode a `RIPScene` back into RIPscrip 1.54 text form. Round-trips
+    /// against `decode` for all spec-defined commands; `.unknown` and
+    /// `.ansiSense` cases are not part of the file format and are skipped.
+    public static func encode(_ scene: RIPScene) -> String {
+        RIPWriter.encode(scene)
+    }
+
     /// Render a `RIPScene` to its native 640x350 `CGImage`. Returns `nil`
     /// if the underlying `CGImage` cannot be constructed (e.g. on a
     /// platform without CoreGraphics, which our package targets exclude).
