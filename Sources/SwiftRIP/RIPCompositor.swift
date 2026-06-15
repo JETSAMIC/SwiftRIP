@@ -28,14 +28,20 @@ public enum RIPCompositor {
 
     /// Compose the canvas through the scale + AA pipeline described in
     /// `RIPRenderOptions`. Returns the native `CGImage` if `targetSize`
-    /// is nil; otherwise nearest-neighbour scaled to `targetSize`. The
-    /// optional anti-aliasing pass is bolted on in a later step.
+    /// is nil; otherwise nearest-neighbour scaled (and optionally
+    /// AA-smoothed) to `targetSize`.
     public static func compose(canvas: RIPCanvas, options: RIPRenderOptions) -> CGImage? {
         guard let nativeImage = canvas.cgImage() else { return nil }
         guard let target = options.targetSize else { return nativeImage }
         let w = max(1, Int(target.width.rounded()))
         let h = max(1, Int(target.height.rounded()))
-        return nearestNeighbourScale(canvas: canvas, targetWidth: w, targetHeight: h) ?? nativeImage
+        guard let scaled = nearestNeighbourScale(canvas: canvas, targetWidth: w, targetHeight: h) else {
+            return nativeImage
+        }
+        if options.antiAliasing {
+            return antiAliasPass(image: scaled, width: w, height: h) ?? scaled
+        }
+        return scaled
     }
 
     // MARK: - Nearest-neighbour scale
@@ -106,4 +112,32 @@ public enum RIPCompositor {
         )
     }
 
+    // MARK: - Anti-aliasing pass
+
+    /// Optional smoothing pass applied AFTER nearest-neighbour scale. Uses
+    /// CoreGraphics `.high` interpolation; output is a same-sized
+    /// `CGImage`. Intentionally a separate stage so the chunky-EGA NN
+    /// buffer is the option callers can keep by flipping `antiAliasing`
+    /// to `false` on `RIPRenderOptions`. Combining NN-replicate + a
+    /// downstream blur is a deliberate two-step pipeline so the
+    /// pre-AA chunky output is not lost — callers that want pixel-art
+    /// fidelity drop the second pass; callers driving a Retina display
+    /// keep it.
+    public static func antiAliasPass(image: CGImage, width: Int, height: Int) -> CGImage? {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue).rawValue
+        guard let ctx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.setShouldAntialias(true)
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage()
+    }
 }
