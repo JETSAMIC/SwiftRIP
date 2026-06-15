@@ -114,19 +114,45 @@ public enum RIPCompositor {
 
     // MARK: - Anti-aliasing pass
 
-    /// Optional smoothing pass applied AFTER nearest-neighbour scale. Uses
-    /// CoreGraphics `.high` interpolation; output is a same-sized
-    /// `CGImage`. Intentionally a separate stage so the chunky-EGA NN
-    /// buffer is the option callers can keep by flipping `antiAliasing`
-    /// to `false` on `RIPRenderOptions`. Combining NN-replicate + a
-    /// downstream blur is a deliberate two-step pipeline so the
-    /// pre-AA chunky output is not lost — callers that want pixel-art
-    /// fidelity drop the second pass; callers driving a Retina display
-    /// keep it.
+    /// Optional smoothing pass applied AFTER nearest-neighbour scale. The
+    /// chunky NN raster is round-tripped through a half-resolution
+    /// intermediate using CoreGraphics `.high` interpolation, which
+    /// produces a gentle anti-aliasing of the hard EGA pixel edges
+    /// without losing the underlying composition.
+    ///
+    /// This is intentionally a separate stage so the chunky-EGA NN
+    /// buffer is preserved as the option callers can keep by flipping
+    /// `antiAliasing` to `false` on `RIPRenderOptions`. A same-size
+    /// CG redraw with `.high` interpolation is a no-op on aligned
+    /// rasters, so we deliberately step through a smaller intermediate
+    /// — that is what actually engages the interpolation kernels.
     public static func antiAliasPass(image: CGImage, width: Int, height: Int) -> CGImage? {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue).rawValue
-        guard let ctx = CGContext(
+        let halfW = Swift.max(1, width / 2)
+        let halfH = Swift.max(1, height / 2)
+
+        // Stage 1: downscale NN raster to half resolution with .high
+        // interpolation. This averages source pixels into the smaller
+        // grid.
+        guard let down = CGContext(
+            data: nil,
+            width: halfW,
+            height: halfH,
+            bitsPerComponent: 8,
+            bytesPerRow: halfW * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+        down.interpolationQuality = .high
+        down.setShouldAntialias(true)
+        down.draw(image, in: CGRect(x: 0, y: 0, width: halfW, height: halfH))
+        guard let downImage = down.makeImage() else { return nil }
+
+        // Stage 2: upscale the half-resolution averaged image back to
+        // the target size with .high interpolation. This produces the
+        // anti-aliased final raster.
+        guard let up = CGContext(
             data: nil,
             width: width,
             height: height,
@@ -135,9 +161,9 @@ public enum RIPCompositor {
             space: colorSpace,
             bitmapInfo: bitmapInfo
         ) else { return nil }
-        ctx.interpolationQuality = .high
-        ctx.setShouldAntialias(true)
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return ctx.makeImage()
+        up.interpolationQuality = .high
+        up.setShouldAntialias(true)
+        up.draw(downImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return up.makeImage()
     }
 }
