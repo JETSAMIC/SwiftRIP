@@ -18,23 +18,6 @@
 import Foundation
 import CoreGraphics
 
-/// Options that influence rendering. Placeholder for the Modernizations
-/// phase; populated with non-disruptive defaults today.
-public struct RIPRenderOptions: Sendable {
-    /// Background palette index used by `eraseWindow` / `resetWindows`.
-    public var clearColor: UInt8 = 0
-    /// If true, anti-alias scaling is applied at composition time (handled
-    /// by callers via CGImage scaling). The native render is always
-    /// nearest-neighbour for pixel fidelity.
-    public var antialiased: Bool = false
-    /// Output scale factor for the snapshot. 1 = native 640x350.
-    public var scale: Int = 1
-
-    public static let `default` = RIPRenderOptions()
-
-    public init() {}
-}
-
 /// Sidecar struct returned alongside the rendered canvas: captures the
 /// interactive subsystem commands so a host shell can introspect them even
 /// though they produce no visible output.
