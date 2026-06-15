@@ -46,24 +46,43 @@ public enum RIPInterpreter {
     /// the captured interactive subsystem snapshot.
     @discardableResult
     public static func interpret(_ scene: RIPScene, into canvas: RIPCanvas, state: inout RIPGraphicsState, options: RIPRenderOptions = .default) -> RIPSceneInteractive {
-        var inter = RIPSceneInteractive()
-
-        // Keep canvas palette in sync with state at start.
-        canvas.palette = state.palette
-        canvas.refreshRGBA()
-
-        // Clipboard slot for getImage/putImage (single page model).
-        var clipboard: ClipImage? = nil
-
+        let session = Session(canvas: canvas, state: state, options: options)
         for cmd in scene.commands {
-            interpretOne(cmd, into: canvas, state: &state, inter: &inter, clipboard: &clipboard, options: options)
-            // Keep canvas palette in sync if state changed it.
+            session.step(cmd)
+        }
+        state = session.state
+        return session.inter
+    }
+
+    /// Stateful walker used by the animation pipeline to step a scene
+    /// one (or N) commands at a time while preserving cross-command
+    /// state (clipboard, palette sync, interactive sidecar). The public
+    /// `interpret(_:)` collapses onto this same path so static and
+    /// animated playback share semantics.
+    final class Session {
+        let canvas: RIPCanvas
+        var state: RIPGraphicsState
+        var inter: RIPSceneInteractive
+        var clipboard: ClipImage?
+        let options: RIPRenderOptions
+
+        init(canvas: RIPCanvas, state: RIPGraphicsState, options: RIPRenderOptions) {
+            self.canvas = canvas
+            self.state = state
+            self.inter = RIPSceneInteractive()
+            self.clipboard = nil
+            self.options = options
+            canvas.palette = state.palette
+            canvas.refreshRGBA()
+        }
+
+        func step(_ cmd: RIPCommand) {
+            RIPInterpreter.interpretOne(cmd, into: canvas, state: &state, inter: &inter, clipboard: &clipboard, options: options)
             if canvas.palette != state.palette {
                 canvas.palette = state.palette
                 canvas.refreshRGBA()
             }
         }
-        return inter
     }
 
     // MARK: - One command
