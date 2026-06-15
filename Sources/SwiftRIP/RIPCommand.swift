@@ -66,7 +66,7 @@ public enum RIPCommand: Equatable, Sendable {
     case putImage(x: Int, y: Int, mode: Int, reserved: Int)
     case writeIcon(filename: String)
     case loadIcon(x: Int, y: Int, mode: Int, clipboard: Int, reserved: Int, filename: String)
-    case buttonStyle(width: Int, height: Int, orientation: Int, flags1: Int, flags2: Int, bevel: Int, dfore: Int, dback: Int, bright: Int, dark: Int, surface: Int, groupReturnChar: Int, flags3: Int, underline: Int, corner: Int, reserved: Int)
+    case buttonStyle(width: Int, height: Int, orientation: Int, flags: Int, bevelSize: Int, dfore: Int, dback: Int, bright: Int, dark: Int, surface: Int, gborder: Int, gcorner: Int, uline: Int, corner: Int, reserved: Int, label: String)
     case button(x0: Int, y0: Int, x1: Int, y1: Int, hotkey: Int, flags: Int, label: String)
     case define(id: Int, flags: Int, string: String)
     case query(flags: Int, string: String)
