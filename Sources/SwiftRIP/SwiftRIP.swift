@@ -40,22 +40,26 @@ public enum SwiftRIP {
         RIPWriter.encode(scene)
     }
 
-    /// Render a `RIPScene` to its native 640x350 `CGImage`. Returns `nil`
-    /// if the underlying `CGImage` cannot be constructed (e.g. on a
-    /// platform without CoreGraphics, which our package targets exclude).
+    /// Render a `RIPScene` to a `CGImage`. Native 640x350 when
+    /// `options.targetSize` is `nil`; otherwise nearest-neighbour scaled
+    /// to `targetSize` with optional anti-aliasing applied afterward.
+    /// Returns `nil` if the underlying `CGImage` cannot be constructed.
     public static func render(_ scene: RIPScene, options: RIPRenderOptions = .default) -> CGImage? {
         let (image, _, _, _) = renderToCanvas(scene, options: options)
         return image
     }
 
     /// Render a `RIPScene` and return the canvas + final graphics state +
-    /// interactive sidecar alongside the snapshot.
+    /// interactive sidecar alongside the snapshot. The returned `CGImage`
+    /// honours `options.targetSize` and `options.antiAliasing`; the
+    /// returned `RIPCanvas` is always the native 640x350 framebuffer.
     public static func renderToCanvas(_ scene: RIPScene, options: RIPRenderOptions = .default) -> (CGImage?, RIPSceneInteractive, RIPCanvas, RIPGraphicsState) {
         let canvas = RIPCanvas()
         var state = RIPGraphicsState()
         canvas.palette = state.palette
         canvas.clear(to: options.clearColor)
         let inter = RIPInterpreter.interpret(scene, into: canvas, state: &state, options: options)
-        return (canvas.cgImage(), inter, canvas, state)
+        let image = RIPCompositor.compose(canvas: canvas, options: options)
+        return (image, inter, canvas, state)
     }
 }
