@@ -16,5 +16,6 @@ let package = Package(
     targets: [
         .target(name: "SwiftRIP"),
         .testTarget(name: "SwiftRIPTests", dependencies: ["SwiftRIP"])
-    ]
+    ],
+    swiftLanguageModes: [.v6]
 )
