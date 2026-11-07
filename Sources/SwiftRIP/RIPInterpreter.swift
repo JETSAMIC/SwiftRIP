@@ -502,7 +502,8 @@ final class RIPInterpreter {
     private func arcPoints(cx: Int, cy: Int, rx: Int, ry: Int, start: Int, end: Int) -> [RIPPoint] {
         guard start != end else { return [] }
         let s = ((start % 360) + 360) % 360
-        var span = ((end - start) % 360 + 360) % 360
+        let e = ((end % 360) + 360) % 360
+        var span = (e - s + 360) % 360
         if span == 0 { span = 360 }
         let sRad = Double(s) * .pi / 180
         let spanRad = Double(span) * .pi / 180
