@@ -33,7 +33,7 @@ enum RIPCompositor {
 
     static func dimension(_ value: CGFloat) -> Int {
         guard value.isFinite else { return 1 }
-        return Swift.max(1, Swift.min(maxDimension, Int(value.rounded())))
+        return Int(Swift.max(1, Swift.min(CGFloat(maxDimension), value.rounded())))
     }
 
     /// Nearest-neighbour scale: destination pixel `d` samples source pixel

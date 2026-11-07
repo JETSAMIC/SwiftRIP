@@ -22,7 +22,8 @@ public enum MegaNum {
         case invalidDigit(Character)
         /// The decoded value does not fit in `Int`.
         case overflow
-        /// The value is negative or needs more than `width` digits.
+        /// The value is negative or needs more than `width` digits, or
+        /// `width` is outside `1...maxWidth`.
         case valueOutOfRange(value: Int, width: Int)
     }
 
@@ -84,12 +85,12 @@ public enum MegaNum {
     ///
     /// - Parameters:
     ///   - value: The value to encode; must be in `0...maxValue(width:)`.
-    ///   - width: Number of digits to emit (at least 1).
+    ///   - width: Number of digits to emit, `1...maxWidth`.
     /// - Returns: A string of exactly `width` characters.
     /// - Throws: ``DecodeError/valueOutOfRange(value:width:)`` if `value` is
     ///   negative or needs more than `width` digits.
     public static func encode(_ value: Int, width: Int) throws -> String {
-        guard width > 0, value >= 0 else {
+        guard (1...maxWidth).contains(width), value >= 0 else {
             throw DecodeError.valueOutOfRange(value: value, width: width)
         }
         if let maximum = maxValue(width: width), value > maximum {
@@ -107,6 +108,9 @@ public enum MegaNum {
         }
         return String(digits.reversed())
     }
+
+    /// Widest MegaNum ``encode(_:width:)`` accepts (RIPscrip uses at most 8).
+    public static let maxWidth = 32
 
     // MARK: - Internal helpers
 

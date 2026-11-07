@@ -41,8 +41,11 @@ public struct RIPFramebuffer: Equatable, Sendable {
 
     /// Palette index at `(x, y)`, or `nil` outside the framebuffer.
     public func colorIndex(x: Int, y: Int) -> UInt8? {
-        guard x >= 0, y >= 0, x < width, y < height, y * width + x < indexed.count else { return nil }
-        return indexed[y * width + x]
+        guard x >= 0, y >= 0, x < width, y < height else { return nil }
+        let (row, o1) = y.multipliedReportingOverflow(by: width)
+        let (i, o2) = row.addingReportingOverflow(x)
+        guard !o1, !o2, i < indexed.count else { return nil }
+        return indexed[i]
     }
 
     /// RGBA8 pixels (opaque, row-major), resolved through ``palette``.
@@ -65,7 +68,9 @@ public struct RIPFramebuffer: Equatable, Sendable {
     }
 
     static func makeImage(rgba: [UInt8], width: Int, height: Int) -> CGImage? {
-        guard width > 0, height > 0, rgba.count == width * height * 4,
+        let (pixels, o1) = width.multipliedReportingOverflow(by: height)
+        let (bytes, o2) = pixels.multipliedReportingOverflow(by: 4)
+        guard width > 0, height > 0, !o1, !o2, rgba.count == bytes,
               let space = CGColorSpace(name: CGColorSpace.sRGB),
               let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
@@ -130,8 +135,14 @@ final class RIPCanvas {
     private(set) var indexed: [UInt8]
     /// Active palette (16 master values); used only for snapshots.
     var palette: [UInt8] = RIPPalette.default16
-    /// Number of pixel writes performed so far (the render work budget).
+    /// Work done so far, in pixel writes plus rasterizer steps that did not
+    /// write a pixel (clipped line steps, polygon edges per scan line, arc
+    /// points). Compared against the render budget.
     private(set) var pixelWrites = 0
+
+    /// Account for work that does not write pixels.
+    @inline(__always)
+    func charge(_ units: Int) { pixelWrites &+= Swift.max(0, units) }
     /// Flood-fill visitation stamps (one generation per fill).
     private var stamps: [UInt32] = []
     private var stampGeneration: UInt32 = 0
@@ -222,6 +233,7 @@ final class RIPCanvas {
         var x = x0, y = y0
         let dx = abs(x1 - x0)
         let dy = -abs(y1 - y0)
+        charge(Swift.max(dx, -dy) + 1)
         let sx = x0 < x1 ? 1 : -1
         let sy = y0 < y1 ? 1 : -1
         var err = dx + dy
@@ -263,6 +275,7 @@ final class RIPCanvas {
             line(cx - rx, cy - ry, cx + rx, cy + ry, pen: Pen(color: color), clip: clip)
             return
         }
+        charge(rx + ry + 2)
         let fx = Double(rx), fy = Double(ry)
         for dx in 0...rx {
             let t = Double(dx) / fx
@@ -299,6 +312,7 @@ final class RIPCanvas {
         guard top <= bottom else { return }
         var crossings: [Int] = []
         crossings.reserveCapacity(points.count)
+        charge((bottom - top + 1) * points.count)
         for y in top...bottom {
             crossings.removeAll(keepingCapacity: true)
             let sampleY = Double(y) + 0.5

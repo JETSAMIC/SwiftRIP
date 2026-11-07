@@ -39,8 +39,10 @@ public struct RIPRenderOptions: Equatable, Sendable {
     /// Default `true`.
     public var antiAliasing: Bool = true
 
-    /// Maximum number of pixel writes the renderer performs before it stops
-    /// executing further commands, or `nil` for no limit.
+    /// Maximum amount of rendering work — pixel writes plus rasterizer steps
+    /// that land off screen (clipped line steps, polygon edges per scan line,
+    /// arc points) — before the renderer stops executing further commands,
+    /// or `nil` for no limit.
     ///
     /// Every command's work is bounded by the screen area, but a hostile
     /// script can repeat expensive commands (full-screen flood fills, screen
@@ -50,7 +52,7 @@ public struct RIPRenderOptions: Equatable, Sendable {
     /// scenes need (about 900 full-screen fills).
     public var pixelBudget: Int? = RIPRenderOptions.defaultPixelBudget
 
-    /// Default ``pixelBudget``: 200 million pixel writes.
+    /// Default ``pixelBudget``: 200 million work units.
     public static let defaultPixelBudget = 200_000_000
 
     /// Default options: static, native size, anti-aliasing on (no effect at

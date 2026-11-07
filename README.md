@@ -82,7 +82,7 @@ Against the RIPscrip 1.54 specification (TeleGrafix, July 1993). "Parsed" means 
 - **Fonts are approximations.** BGI's stroke fonts and the PC ROM 8x8 font are not redistributable, so glyph shapes and advance widths differ from RIPterm; characters outside ASCII 32-126 draw nothing.
 - **No icons.** `.ICN` files are not read; `LOAD_ICON` draws nothing and icon buttons render without their image.
 - **No terminal.** SwiftRIP does not emulate the TTY text window, send host commands, answer queries or transfer files.
-- **Work budget.** `RIPRenderOptions.pixelBudget` (default 200 million pixel writes, about 900 full-screen flood fills, roughly 1.5 s on Apple silicon) stops hostile scripts; `RIPRenderResult.isTruncated` reports it. Set it to `nil` to disable.
+- **Work budget.** `RIPRenderOptions.pixelBudget` (default 200 million work units — pixel writes plus off-screen rasterizer steps; about 900 full-screen flood fills, roughly 1.5 s on Apple silicon) stops hostile scripts; `RIPRenderResult.isTruncated` reports it. Set it to `nil` to disable.
 - Out-of-range argument values and spec errata are handled as documented in [`Reference/RIPscrip-Format.md`](Reference/RIPscrip-Format.md) §12.
 
 ## References

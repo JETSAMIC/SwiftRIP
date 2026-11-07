@@ -28,6 +28,13 @@ public enum RIPWriteError: Error, Equatable, Sendable {
     /// is not all decimal digits or whose command character is a digit, `|`,
     /// a backslash or a line break, so it cannot be re-emitted as one command.
     case invalidUnknownCommand(level: String, command: Character)
+    /// A text argument contains a sequence that cannot be represented: a
+    /// `<>` inside the filename of RIP_ENTER_BLOCK_MODE (which ends at its
+    /// first `<>`), or an unescaped `|` in the arguments of an
+    /// ``RIPCommand/unknown(level:command:arguments:)`` value.
+    case unrepresentableText(command: String)
+    /// `lineEnding` is not `"\r\n"`, `"\n"` or `"\r"`.
+    case invalidLineEnding
 }
 
 /// Stateless RIPscrip 1.54 encoder.
@@ -53,6 +60,7 @@ public enum RIPWriter {
     /// - Throws: ``RIPWriteError`` if a command cannot be represented.
     public static func encode(_ scene: RIPScene, lineWidth: Int = RIPWriter.defaultLineWidth,
                               lineEnding: String = "\r\n") throws -> String {
+        guard ["\r\n", "\n", "\r"].contains(lineEnding) else { throw RIPWriteError.invalidLineEnding }
         let width = Swift.max(8, lineWidth)
         var out = ""
         for command in scene.commands {
@@ -100,17 +108,33 @@ public enum RIPWriter {
             }
         }
 
+        /// Already-escaped text: `\x` pairs stay together as one atom so a
+        /// fold never separates them; a bare `|` would split the command.
         mutating func raw(_ s: String) throws {
-            var trailingBackslashes = 0
-            for scalar in s.unicodeScalars {
+            let scalars = Array(s.unicodeScalars)
+            var i = 0
+            while i < scalars.count {
+                let scalar = scalars[i]
                 if scalar == "\r" || scalar == "\n" {
                     throw RIPWriteError.lineBreakInText(command: name)
                 }
-                trailingBackslashes = scalar == "\\" ? trailingBackslashes + 1 : 0
+                if scalar == "|" { throw RIPWriteError.unrepresentableText(command: name) }
+                if scalar == "\\" {
+                    if i + 1 < scalars.count {
+                        let next = scalars[i + 1]
+                        if next == "\r" || next == "\n" { throw RIPWriteError.lineBreakInText(command: name) }
+                        atoms.append("\\" + String(next))
+                        i += 2
+                        continue
+                    }
+                    // A lone trailing backslash would read as a continuation.
+                    atoms.append("\\\\")
+                    i += 1
+                    continue
+                }
                 atoms.append(String(scalar))
+                i += 1
             }
-            // An odd backslash run at end of line would read as a continuation.
-            if trailingBackslashes % 2 == 1 { atoms.append("\\") }
         }
 
         mutating func points(_ points: [RIPPoint]) throws {
@@ -246,19 +270,33 @@ public enum RIPWriter {
         // MARK: Level 9
         case let .enterBlockMode(mode, proto, fileType, res, filename):
             b = Body("9\u{1B}"); try b.num(mode, 1); try b.num(proto, 1); try b.num(fileType, 2)
+            guard !filename.contains("<>") else { throw RIPWriteError.unrepresentableText(command: "9\u{1B}") }
             try b.num(res, 4); try b.text(filename); b.atoms.append(contentsOf: ["<", ">"])
 
         // MARK: Out-of-band
         case .ansiSense:
             return nil
         case let .unknown(level, command, arguments):
-            let badCommand = command.isNumber || ["|", "\\", "\r", "\n", "\r\n"].contains(command)
+            let scalars = command.unicodeScalars
+            let badCommand = scalars.count != 1 || command.isNumber || command.isWhitespace
+                || ["|", "\\"].contains(command) || isDefined(level: level, command: command)
             guard !badCommand, level.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }) else {
                 throw RIPWriteError.invalidUnknownCommand(level: level, command: command)
             }
             b = Body(level + String(command)); try b.raw(arguments)
         }
         return b.atoms
+    }
+
+    /// `true` if `(level, command)` is a RIPscrip 1.54 command, which an
+    /// `.unknown` value must not imitate.
+    private static func isDefined(level: String, command: Character) -> Bool {
+        switch level {
+        case "": return "wv*eEgH>cQaWmT@YXLRBCOoAVIiZPplF=Ss#".contains(command)
+        case "1": return "MKTtECPWIBUDGRF\u{1B}".contains(command)
+        case "9": return command == "\u{1B}"
+        default: return false
+        }
     }
 
     // MARK: - Folding

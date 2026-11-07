@@ -508,6 +508,7 @@ final class RIPInterpreter {
         let sRad = Double(s) * .pi / 180
         let spanRad = Double(span) * .pi / 180
         let steps = Swift.max(4, Swift.min(20_000, Int((spanRad * Double(Swift.max(rx, ry))).rounded(.up)) + 1))
+        canvas.charge(steps + 1)
         var points: [RIPPoint] = []
         points.reserveCapacity(steps + 1)
         for i in 0...steps {

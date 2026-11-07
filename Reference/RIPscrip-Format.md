@@ -444,10 +444,12 @@ SwiftRIP does not read or write `.ICN` files.
 * **Reset scope.** RIP_RESET_WINDOWS resets what the spec lists (windows,
   cursor, screen, mouse regions, clipboard, palette); drawing color, fill,
   line style, font and write mode are kept.
-* **Work budget.** Every command is bounded by the screen area, but a
-  script can repeat expensive commands. SwiftRIP stops after a configurable
-  number of pixel writes (default 200 million, about 900 full-screen flood
-  fills, roughly 1.5 s on Apple silicon) and reports truncation.
+* **Work budget.** Every command's cost is bounded (by the screen area or
+  by the 2-digit argument range), but a script can repeat expensive
+  commands, including geometry that lands entirely off screen. SwiftRIP
+  counts pixel writes plus off-screen rasterizer steps and stops after a
+  configurable budget (default 200 million units, about 900 full-screen
+  flood fills, roughly 1.5 s on Apple silicon), reporting truncation.
 
 ## 13. Licence terms
 

@@ -3,6 +3,7 @@
 // pathological scripts.
 
 import XCTest
+import CoreGraphics
 @testable import SwiftRIP
 
 final class RobustnessTests: XCTestCase {
@@ -211,5 +212,66 @@ final class RobustnessTests: XCTestCase {
         XCTAssertEqual(scene.commands, [.text(String(repeating: "ab", count: 20_000) + "end")])
         let segments = "!|" + String(repeating: "|", count: 50_000) + "c01\r\n"
         XCTAssertEqual(try RIPParser.parse(segments).commands, [.color(1)])
+    }
+}
+
+/// Regressions for issues found in code review of the rewrite.
+final class ReviewRegressionTests: XCTestCase {
+
+    /// Escape pairs in `.unknown` arguments must never be split by a fold.
+    func testUnknownArgumentsSurviveFolding() throws {
+        let source = "!|z" + String(repeating: "a", count: 71) + "\\|b\r\n"
+        let scene = try RIPParser.parse(source)
+        XCTAssertEqual(scene.commands, [.unknown(level: "", command: "z", arguments: String(repeating: "a", count: 71) + "\\|b")])
+        for width in 8...80 {
+            let text = try RIPWriter.encode(scene, lineWidth: width)
+            XCTAssertEqual(try RIPParser.parse(text), scene, "width \(width)")
+        }
+    }
+
+    /// Off-screen geometry still consumes the budget.
+    func testOffScreenPieSlicesHitTheBudget() throws {
+        let scene = try RIPParser.parse("!|" + Array(repeating: "IZZ4V00A0I7", count: 2000).joined(separator: "|") + "\r\n")
+        var options = RIPRenderOptions()
+        options.pixelBudget = 20_000_000
+        let start = Date()
+        let result = SwiftRIP.renderResult(scene, options: options)
+        XCTAssertTrue(result.isTruncated)
+        XCTAssertTrue(result.framebuffer.indexed.allSatisfy { $0 == 0 })
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    func testInvisibleLinesHitTheBudget() throws {
+        let scene = try RIPParser.parse("!|=04000001|" + Array(repeating: "L0000HR9P", count: 20_000).joined(separator: "|"))
+        var options = RIPRenderOptions()
+        options.pixelBudget = 1_000_000
+        XCTAssertTrue(SwiftRIP.renderResult(scene, options: options).isTruncated)
+    }
+
+    func testPublicAPIExtremesDoNotTrap() {
+        var options = RIPRenderOptions()
+        options.targetSize = CGSize(width: 1e20, height: -1e20)
+        options.antiAliasing = false
+        XCTAssertEqual(SwiftRIP.render(RIPScene(commands: []), options: options)?.width, 16_384)
+        XCTAssertNil(RIPFramebuffer(width: .max, height: 2, indexed: [], palette: []).colorIndex(x: 1, y: 1))
+        XCTAssertNil(RIPFramebuffer(width: 1 << 32, height: 1 << 32, indexed: [], palette: []).cgImage())
+        XCTAssertThrowsError(try MegaNum.encode(0, width: .max))
+        XCTAssertThrowsError(try MegaNum.encode(0, width: 1 << 34))
+        XCTAssertEqual(try MegaNum.encode(0, width: MegaNum.maxWidth).count, MegaNum.maxWidth)
+    }
+
+    func testWriterRejectsUnrepresentableValues() {
+        func encode(_ c: RIPCommand, lineEnding: String = "\r\n") throws -> String {
+            try RIPWriter.encode(RIPScene(commands: [c]), lineEnding: lineEnding)
+        }
+        XCTAssertThrowsError(try encode(.enterBlockMode(mode: 0, transferProtocol: 0, fileType: 0, reserved: 0, filename: "A<>B")))
+        XCTAssertThrowsError(try encode(.unknown(level: "", command: "z", arguments: "a|L00000000")))
+        XCTAssertThrowsError(try encode(.unknown(level: "", command: "c", arguments: "05")))
+        XCTAssertThrowsError(try encode(.unknown(level: "1", command: "M", arguments: "")))
+        XCTAssertThrowsError(try encode(.unknown(level: "", command: "e\u{301}", arguments: "")))
+        XCTAssertThrowsError(try encode(.unknown(level: "", command: " ", arguments: "")))
+        XCTAssertThrowsError(try encode(.color(1), lineEnding: "\n\r"))
+        XCTAssertThrowsError(try encode(.color(1), lineEnding: ""))
+        XCTAssertEqual(try encode(.unknown(level: "", command: "z", arguments: "a!b\\")), "!|za!b\\\\\r\n")
     }
 }
