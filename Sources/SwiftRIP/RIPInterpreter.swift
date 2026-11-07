@@ -541,17 +541,16 @@ final class RIPInterpreter {
         canvas.line(cx, cy, last.x, last.y, pen: pen, clip: clip)
     }
 
-    /// Draw text at a viewport-relative position and move the drawing
-    /// position to just after it.
+    /// Draw text at a viewport-relative position; horizontal text leaves the
+    /// drawing position just after it, vertical text leaves it at `p`.
     private func drawText(_ s: String, at p: RIPPoint, clip: ClipRect) {
         let (ax, ay) = absolute(p.x, p.y, in: clip)
         RIPVectorFonts.renderText(s, x: ax, y: ay, font: state.font, direction: state.fontDirection,
                                   size: state.fontSize, color: state.drawColor, mode: state.writeMode,
                                   into: canvas, clip: clip)
+        // As BGI's outtext(): only horizontal text advances the position.
         let advance = Self.clamp(RIPVectorFonts.width(of: s, font: state.font, size: state.fontSize))
-        state.position = state.fontDirection == 0
-            ? RIPPoint(x: Self.clamp(p.x + advance), y: p.y)
-            : RIPPoint(x: p.x, y: Self.clamp(p.y - advance))
+        state.position = state.fontDirection == 0 ? RIPPoint(x: Self.clamp(p.x + advance), y: p.y) : p
     }
 
     private func drawRegionText(_ s: String, justify: Bool, region: inout RIPGraphicsState.TextRegion, clip: ClipRect) {
@@ -587,6 +586,7 @@ final class RIPInterpreter {
     /// boundaries, ignored if the destination would leave the screen or
     /// starts on the source's first line.
     private func copyRegion(x0: Int, y0: Int, x1: Int, y1: Int, dest: Int) {
+        let (x0, y0, x1, y1, dest) = (Self.clamp(x0), Self.clamp(y0), Self.clamp(x1), Self.clamp(y1), Self.clamp(dest))
         guard x0 <= x1, y0 <= y1, dest != y0, y0 >= 0, dest >= 0 else { return }
         let left = Swift.max(0, (x0 / 8) * 8)
         let right = Swift.min(canvas.width - 1, (Swift.min(x1, canvas.width) / 8 + 1) * 8 - 1)

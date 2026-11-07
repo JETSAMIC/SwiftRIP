@@ -69,6 +69,11 @@ final class RIPInterpreterTests: XCTestCase {
         XCTAssertGreaterThan(count(r, 15), 28)
     }
 
+    func testVerticalTextDoesNotMovePosition() {
+        let r = execute([.fontStyle(font: 0, direction: 1, size: 1, reserved: 0), .textXY(x: 5, y: 60, string: "Hi")])
+        XCTAssertEqual(r.state.position, RIPPoint(x: 5, y: 60))
+    }
+
     func testTextXYMovesPositionPastText() {
         let r = execute([.fontStyle(font: 0, direction: 0, size: 2, reserved: 0), .textXY(x: 5, y: 6, string: "Hi")])
         XCTAssertEqual(r.state.position, RIPPoint(x: 5 + 32, y: 6))

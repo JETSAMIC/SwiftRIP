@@ -225,7 +225,9 @@ Semantics worth noting:
   changed; if the seed pixel already is the border color nothing happens;
   an unenclosed fill stops at the viewport edges.
 * RIP_TEXT and RIP_TEXT_XY leave the drawing position just after the text;
-  other drawing commands (including RIP_LINE) do not move it.
+  other drawing commands (including RIP_LINE) do not move it. (SwiftRIP
+  follows BGI's `outtext()` for vertical text, which leaves the position
+  unchanged.)
 * RIP_RESET_WINDOWS: full-screen text window (80x43) and viewport, cursor
   home, screen cleared to color 0, mouse regions and clipboard deleted,
   default palette restored.
