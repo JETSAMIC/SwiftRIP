@@ -19,10 +19,7 @@ final class RIPScaleTests: XCTestCase {
     /// 16-color RIP palette) and the canvas.
     private func tinyCanvasWithPixel(at x: Int, y: Int, color: UInt8 = 15) -> RIPCanvas {
         let canvas = RIPCanvas()
-        let state = RIPGraphicsState()
-        canvas.palette = state.palette
-        canvas.clear(to: 0)
-        canvas.setPixel(x: x, y: y, color: color, state: state)
+        canvas.plot(x, y, color, .copy, canvas.screen)
         return canvas
     }
 
@@ -52,7 +49,7 @@ final class RIPScaleTests: XCTestCase {
     func testIntegerDoubleScaleReplicatesPixels() {
         // Plant a white pixel at (10, 20) on the native canvas.
         let canvas = tinyCanvasWithPixel(at: 10, y: 20)
-        let scaled = RIPCompositor.nearestNeighbourScale(canvas: canvas, targetWidth: 1280, targetHeight: 700)
+        let scaled = RIPCompositor.nearestNeighbourScale(rgba: canvas.rgba, width: canvas.width, height: canvas.height, targetWidth: 1280, targetHeight: 700)
         XCTAssertNotNil(scaled)
         let img = scaled!
         XCTAssertEqual(img.width, 1280)
@@ -84,7 +81,7 @@ final class RIPScaleTests: XCTestCase {
         // is 1920/640 = 3.0 horizontally (still integer) and 1080/350 ≈
         // 3.0857 vertically. Vertical mapping is dy * 350 / 1080.
         let canvas = tinyCanvasWithPixel(at: 100, y: 50)
-        let scaled = RIPCompositor.nearestNeighbourScale(canvas: canvas, targetWidth: 1920, targetHeight: 1080)
+        let scaled = RIPCompositor.nearestNeighbourScale(rgba: canvas.rgba, width: canvas.width, height: canvas.height, targetWidth: 1920, targetHeight: 1080)
         XCTAssertNotNil(scaled)
         let img = scaled!
         XCTAssertEqual(img.width, 1920)

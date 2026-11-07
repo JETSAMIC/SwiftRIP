@@ -1,53 +1,46 @@
-// RIPPaletteTests — spec-table values for the default 16 RIP palette
-// entries, plus mutator behavior.
+// RIPPaletteTests — EGA master palette and the default RIPscrip palette.
 
 import XCTest
 @testable import SwiftRIP
 
 final class RIPPaletteTests: XCTestCase {
 
-    func testMasterTableSize() {
+    func testMasterTable() {
         XCTAssertEqual(RIPPalette.master.count, 64)
-    }
-
-    func testDefault16Length() {
-        XCTAssertEqual(RIPPalette.default16.count, 16)
+        XCTAssertEqual(RIPPalette.master[0], RIPPalette.RGB(0, 0, 0))
+        XCTAssertEqual(RIPPalette.master[0o07], RIPPalette.RGB(0xAA, 0xAA, 0xAA))
+        XCTAssertEqual(RIPPalette.master[0o70], RIPPalette.RGB(0x55, 0x55, 0x55))
+        XCTAssertEqual(RIPPalette.master[0o77], RIPPalette.RGB(0xFF, 0xFF, 0xFF))
+        XCTAssertEqual(RIPPalette.master[20], RIPPalette.RGB(0xAA, 0x55, 0x00))
     }
 
     func testDefault16NamedColors() {
-        // Spot-check the canonical EGA colors.
-        let p = RIPPalette.default16
-        XCTAssertEqual(RIPPalette.master[Int(p[0])],  RIPPalette.RGB(0x00, 0x00, 0x00))  // black
-        XCTAssertEqual(RIPPalette.master[Int(p[1])],  RIPPalette.RGB(0x00, 0x00, 0xAA))  // blue
-        XCTAssertEqual(RIPPalette.master[Int(p[2])],  RIPPalette.RGB(0x00, 0xAA, 0x00))  // green
-        XCTAssertEqual(RIPPalette.master[Int(p[3])],  RIPPalette.RGB(0x00, 0xAA, 0xAA))  // cyan
-        XCTAssertEqual(RIPPalette.master[Int(p[4])],  RIPPalette.RGB(0xAA, 0x00, 0x00))  // red
-        XCTAssertEqual(RIPPalette.master[Int(p[5])],  RIPPalette.RGB(0xAA, 0x00, 0xAA))  // magenta
-        XCTAssertEqual(RIPPalette.master[Int(p[6])],  RIPPalette.RGB(0xAA, 0x55, 0x00))  // brown
-        XCTAssertEqual(RIPPalette.master[Int(p[7])],  RIPPalette.RGB(0xAA, 0xAA, 0xAA))  // lightgray
-        XCTAssertEqual(RIPPalette.master[Int(p[8])],  RIPPalette.RGB(0x55, 0x55, 0x55))  // darkgray
-        XCTAssertEqual(RIPPalette.master[Int(p[15])], RIPPalette.RGB(0xFF, 0xFF, 0xFF))  // white
+        let expected: [RIPPalette.RGB] = [
+            .init(0x00, 0x00, 0x00), .init(0x00, 0x00, 0xAA), .init(0x00, 0xAA, 0x00), .init(0x00, 0xAA, 0xAA),
+            .init(0xAA, 0x00, 0x00), .init(0xAA, 0x00, 0xAA), .init(0xAA, 0x55, 0x00), .init(0xAA, 0xAA, 0xAA),
+            .init(0x55, 0x55, 0x55), .init(0x55, 0x55, 0xFF), .init(0x55, 0xFF, 0x55), .init(0x55, 0xFF, 0xFF),
+            .init(0xFF, 0x55, 0x55), .init(0xFF, 0x55, 0xFF), .init(0xFF, 0xFF, 0x55), .init(0xFF, 0xFF, 0xFF),
+        ]
+        XCTAssertEqual((0..<16).map { RIPPalette.resolve(UInt8($0), in: RIPPalette.default16) }, expected)
     }
 
-    func testSetAll() {
-        var state = RIPGraphicsState()
-        let values = Array(0..<16)
-        RIPPalette.setAll(values, on: &state)
-        XCTAssertEqual(state.palette, values.map { UInt8($0) })
+    func testResolveIsTotal() {
+        XCTAssertEqual(RIPPalette.resolve(200, in: [0, 63]), RIPPalette.master[0])
+        XCTAssertEqual(RIPPalette.resolve(1, in: [0, 255]), RIPPalette.master[63])
     }
 
-    func testSetOne() {
-        var state = RIPGraphicsState()
-        let before = state.palette[5]
-        RIPPalette.setOne(slot: 5, value: 42, on: &state)
-        XCTAssertEqual(state.palette[5], 42)
-        XCTAssertNotEqual(state.palette[5], before)
+    func testSetPaletteAndOnePalette() {
+        let r = execute([.setPalette(Array(0..<16)), .onePalette(slot: 5, value: 42), .onePalette(slot: 99, value: 1),
+                     .onePalette(slot: 6, value: 100)])
+        var expected = (0..<16).map(UInt8.init)
+        expected[5] = 42
+        expected[6] = 100 & 0x3F
+        XCTAssertEqual(r.state.palette, expected)
     }
 
-    func testSetOneOutOfBounds() {
-        var state = RIPGraphicsState()
-        let original = state.palette
-        RIPPalette.setOne(slot: 99, value: 1, on: &state)
-        XCTAssertEqual(state.palette, original)
+    func testPaletteChangeRecolorsExistingPixels() {
+        let r = execute([.color(1), .pixel(x: 100, y: 100), .onePalette(slot: 1, value: 4)])
+        let o = (100 * 640 + 100) * 4
+        XCTAssertEqual(Array(r.canvas.rgba[o..<(o + 3)]), [0xAA, 0x00, 0x00])
     }
 }

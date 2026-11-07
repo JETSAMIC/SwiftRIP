@@ -1,157 +1,138 @@
-// RIPVectorFonts — bitmap font 0 (8x8) and clean-room vector fonts 1..A.
+// RIPVectorFonts — text rendering for RIPscrip font 0 (8x8 bitmap) and the
+// ten scalable stroke fonts 1...10.
 //
-// The RIPscrip spec inherits Borland's BGI font model: font 0 is an 8x8
-// bitmap, fonts 1..A are stroked vector fonts (Triplex, Small, SansSerif,
-// Gothic, Script, Simplex, TriplexScript, Complex, European, Bold).
+// RIPscrip uses Borland BGI's font set. The BGI glyph data (the .CHR stroke
+// files and the ROM 8x8 font) is not redistributable, so SwiftRIP ships
+// clean-room approximations:
 //
-// We do NOT copy the BGI .CHR data or any other implementation's glyph
-// definitions. This file contains a clean-room synthesis:
+//   * Font 0 — an 8x8 bitmap for ASCII 32...126 in the style of the IBM PC
+//     8x8 font, drawn for SwiftRIP. Size N replicates each pixel N x N.
+//   * Fonts 1...10 — one monoline stroke set over a 21-unit cell, with a
+//     per-family transform (double stroke for Triplex/Complex, slant for
+//     Script/Triplex Script/European, half height for Small, triple stroke
+//     for Bold). Size N scales the cell by N.
 //
-//   * Font 0 — a compact ASCII 32..126 bitmap, hand-drawn in 8x8 cells,
-//     loosely resembling the IBM PC 8x8 set in proportions but constructed
-//     here for SwiftRIP. Public-domain authorship.
-//
-//   * Fonts 1..A — each is built from a small per-glyph stroke list (move/
-//     line) over a 21x21 normalized cell. Family identity is encoded by a
-//     per-family stroke-style transform applied on render:
-//
-//        Triplex (1)       — double-stroked (parallel offset) for weight
-//        Small (2)         — half-height
-//        SansSerif (3)     — single stroke, no embellishments
-//        Gothic (4)        — single stroke, with vertical accent
-//        Script (5)        — italic slant
-//        Simplex (6)       — single stroke (alias of SansSerif)
-//        TriplexScript (7) — italic slant + double stroke
-//        Complex (8)       — double stroke
-//        European (9)      — italic slant + accent
-//        Bold (A=10)       — quad-stroke (thicker)
-//
-//   The base stroke set covers ASCII 32..126 with simple line geometry — the
-//   priority is "renders as the right letter shape", not perfect typography.
-//   Vector text per the spec scales by an integer factor 1..10; size N
-//   multiplies the 21x21 cell by N.
+// Glyph shapes and advance widths therefore differ from RIPterm; layout
+// (drawing position updates, clipping, direction) follows the spec.
+// Characters outside ASCII 32...126 advance the pen but draw nothing.
 
 import Foundation
-import CoreGraphics
 
-/// Public stroke-font interface. Stateless; reads font index/size off the
-/// graphics state at call time.
-public enum RIPVectorFonts {
+/// Text renderer for the RIPscrip fonts (clean-room approximations).
+enum RIPVectorFonts {
 
-    /// Render a string into `canvas` at `p`, using state's font, direction,
-    /// size, and color.
-    public static func renderText(_ s: String, at p: CGPoint, font: Int, direction: Int, size: Int, color: UInt8, into canvas: RIPCanvas, state: RIPGraphicsState) {
-        var pen = CGPoint(x: p.x, y: p.y)
-        let scale = max(1, min(10, size))
-        let (advance, cellH) = font == 0
-            ? (8 * scale, 8 * scale)
-            : (12 * scale, 21 * scale)
-        for ch in s.unicodeScalars {
-            let code = Int(ch.value)
-            guard (32...126).contains(code) else {
-                pen = step(pen, dx: advance, dy: 0, direction: direction)
-                continue
-            }
-            if font == 0 {
-                renderBitmapGlyph(code: code, at: pen, scale: scale, direction: direction, color: color, into: canvas, state: state, cellH: cellH)
-            } else {
-                renderVectorGlyph(code: code, at: pen, font: font, scale: scale, direction: direction, color: color, into: canvas, state: state)
-            }
-            pen = step(pen, dx: advance, dy: 0, direction: direction)
-        }
+    /// Horizontal advance of one character cell in pixels.
+    static func advance(font: Int, size: Int) -> Int {
+        let scale = Swift.max(1, Swift.min(10, size))
+        return (font == 0 ? 8 : 12) * scale
     }
 
-    private static func step(_ p: CGPoint, dx: Int, dy: Int, direction: Int) -> CGPoint {
-        if direction == 0 {
-            return CGPoint(x: p.x + CGFloat(dx), y: p.y + CGFloat(dy))
-        } else {
-            // Vertical text: positive X advance becomes negative Y (text
-            // grows upward).
-            return CGPoint(x: p.x + CGFloat(dy), y: p.y - CGFloat(dx))
+    /// Height of one line of text in pixels.
+    static func lineHeight(font: Int, size: Int) -> Int {
+        let scale = Swift.max(1, Swift.min(10, size))
+        return (font == 0 ? 8 : 21) * scale
+    }
+
+    /// Width of `s` in pixels when drawn horizontally.
+    static func width(of s: String, font: Int, size: Int) -> Int {
+        s.unicodeScalars.count * advance(font: font, size: size)
+    }
+
+    /// Draw `s` with its top-left corner at `(x, y)` (horizontal) or its
+    /// bottom-left corner at `(x, y)` reading upward (vertical).
+    ///
+    /// Rendering stops as soon as the pen has left `clip` in the direction
+    /// of travel, so arbitrarily long strings cost at most one screen width
+    /// of glyphs.
+    static func renderText(_ s: String, x: Int, y: Int, font: Int, direction: Int, size: Int,
+                           color: UInt8, mode: RIPWriteMode, into canvas: RIPCanvas, clip: ClipRect) {
+        guard !clip.isEmpty else { return }
+        let scale = Swift.max(1, Swift.min(10, size))
+        let step = advance(font: font, size: scale)
+        var penX = x, penY = y
+        for scalar in s.unicodeScalars {
+            if direction == 0 {
+                if penX > clip.x1 { break }
+            } else {
+                if penY < clip.y0 { break }
+            }
+            let code = Int(scalar.value)
+            if (33...126).contains(code) {
+                let visible = direction == 0
+                    ? penX + step >= clip.x0
+                    : penY - step <= clip.y1
+                if visible {
+                    if font == 0 {
+                        renderBitmapGlyph(code: code, x: penX, y: penY, scale: scale, direction: direction,
+                                          color: color, mode: mode, canvas: canvas, clip: clip)
+                    } else {
+                        renderVectorGlyph(code: code, x: penX, y: penY, font: font, scale: scale,
+                                          direction: direction, color: color, mode: mode,
+                                          canvas: canvas, clip: clip)
+                    }
+                }
+            }
+            if direction == 0 { penX += step } else { penY -= step }
         }
     }
 
     // MARK: - Bitmap font 0
 
-    private static func renderBitmapGlyph(code: Int, at p: CGPoint, scale: Int, direction: Int, color: UInt8, into canvas: RIPCanvas, state: RIPGraphicsState, cellH: Int) {
+    private static func renderBitmapGlyph(code: Int, x: Int, y: Int, scale: Int, direction: Int,
+                                          color: UInt8, mode: RIPWriteMode, canvas: RIPCanvas, clip: ClipRect) {
         let glyph = bitmap8x8[code - 32]
-        let ox = Int(p.x.rounded())
-        let oy = Int(p.y.rounded())
         for row in 0..<8 {
             let bits = glyph[row]
-            for col in 0..<8 {
-                if (bits >> (7 - col)) & 1 == 0 { continue }
-                let dx = col * scale
-                let dy = row * scale
+            for col in 0..<8 where (bits >> UInt8(7 - col)) & 1 == 1 {
                 for sy in 0..<scale {
                     for sx in 0..<scale {
-                        let (px, py): (Int, Int)
+                        let u = col * scale + sx   // along the text
+                        let v = row * scale + sy   // down the glyph
                         if direction == 0 {
-                            px = ox + dx + sx
-                            py = oy + dy + sy
+                            canvas.plot(x + u, y + v, color, mode, clip)
                         } else {
-                            px = ox + dy + sy
-                            py = oy - dx - sx
+                            canvas.plot(x + v, y - u, color, mode, clip)
                         }
-                        canvas.setPixel(x: px, y: py, color: color, state: state)
                     }
                 }
             }
         }
     }
 
-    // MARK: - Vector glyph dispatch
+    // MARK: - Stroke fonts
 
-    private static func renderVectorGlyph(code: Int, at p: CGPoint, font: Int, scale: Int, direction: Int, color: UInt8, into canvas: RIPCanvas, state: RIPGraphicsState) {
+    private static func renderVectorGlyph(code: Int, x: Int, y: Int, font: Int, scale: Int, direction: Int,
+                                          color: UInt8, mode: RIPWriteMode, canvas: RIPCanvas, clip: ClipRect) {
         let strokes = vectorStrokes[code - 32]
-        let ox = Int(p.x.rounded())
-        let oy = Int(p.y.rounded())
-
-        // Per-family transforms.
         let italic: Double
         let extraStrokes: Int
         switch font {
-        case 1: italic = 0; extraStrokes = 1            // Triplex
-        case 2: italic = 0; extraStrokes = 0            // Small
-        case 3: italic = 0; extraStrokes = 0            // SansSerif
-        case 4: italic = 0; extraStrokes = 0            // Gothic
-        case 5: italic = 0.30; extraStrokes = 0         // Script
-        case 6: italic = 0; extraStrokes = 0            // Simplex
-        case 7: italic = 0.30; extraStrokes = 1         // TriplexScript
-        case 8: italic = 0; extraStrokes = 1            // Complex
-        case 9: italic = 0.20; extraStrokes = 0         // European
-        case 10: italic = 0; extraStrokes = 2           // Bold
-        default: italic = 0; extraStrokes = 0
+        case 1: italic = 0; extraStrokes = 1       // Triplex
+        case 5: italic = 0.30; extraStrokes = 0    // Script
+        case 7: italic = 0.30; extraStrokes = 1    // Triplex Script
+        case 8: italic = 0; extraStrokes = 1       // Complex
+        case 9: italic = 0.20; extraStrokes = 0    // European
+        case 10: italic = 0; extraStrokes = 2      // Bold
+        default: italic = 0; extraStrokes = 0      // Small, Sans Serif, Gothic, Simplex
         }
-
-        // Font 2 (Small) — half height.
-        let yScale = (font == 2) ? Double(scale) * 0.5 : Double(scale)
+        let yScale = font == 2 ? Double(scale) * 0.5 : Double(scale)
         let xScale = Double(scale)
+        let pen = Pen(color: color, mode: mode)
+
+        func transform(_ px: Int, _ py: Int, _ offset: Int) -> (Int, Int) {
+            let shear = italic * Double(20 - py)
+            let u = Int((Double(px) * xScale + shear * xScale).rounded()) + offset
+            let v = Int((Double(py) * yScale).rounded())
+            return direction == 0 ? (x + u, y + v) : (x + v, y - u)
+        }
 
         for stroke in strokes {
-            // stroke is [x0,y0,x1,y1] in 21x21 cell coords.
             for offset in 0...extraStrokes {
-                let dxOff = offset // parallel-line offset
-                let (sx0, sy0) = transform(x: stroke[0], y: stroke[1], xScale: xScale, yScale: yScale, italic: italic, dxOff: dxOff)
-                let (sx1, sy1) = transform(x: stroke[2], y: stroke[3], xScale: xScale, yScale: yScale, italic: italic, dxOff: dxOff)
-                let (a, b) = orient(x: sx0, y: sy0, direction: direction)
-                let (c, d) = orient(x: sx1, y: sy1, direction: direction)
-                canvas.drawLine(x0: ox + a, y0: oy + b, x1: ox + c, y1: oy + d, color: color, state: state)
+                let (ax, ay) = transform(stroke[0], stroke[1], offset)
+                let (bx, by) = transform(stroke[2], stroke[3], offset)
+                canvas.line(ax, ay, bx, by, pen: pen, clip: clip)
             }
         }
-    }
-
-    private static func transform(x: Int, y: Int, xScale: Double, yScale: Double, italic: Double, dxOff: Int) -> (Int, Int) {
-        // y origin is top of cell. Italic shears top of cell to the right.
-        let shear = italic * Double(20 - y)
-        let sx = Int((Double(x) * xScale + shear * xScale).rounded()) + dxOff
-        let sy = Int((Double(y) * yScale).rounded())
-        return (sx, sy)
-    }
-
-    private static func orient(x: Int, y: Int, direction: Int) -> (Int, Int) {
-        if direction == 0 { return (x, y) }
-        return (y, -x)
     }
 
     // MARK: - Glyph data

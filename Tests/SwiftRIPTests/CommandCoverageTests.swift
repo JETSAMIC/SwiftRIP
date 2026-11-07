@@ -1,170 +1,137 @@
 import XCTest
 @testable import SwiftRIP
 
-/// Per-command parse-only smoke matrix.
-///
-/// Goal: every Level 0 / Level 1 / Level 9 dispatch path in `RIPParser` is
-/// exercised by at least one assertion that the minimal well-formed encoding
-/// of that command decodes without throwing and yields the correct
-/// `RIPCommand` case. This is intentionally redundant with `ParserTests` —
-/// it provides a single-glance coverage table so future refactors of the
-/// parser dispatch surface a missing case immediately.
-///
-/// Width discipline matches `RIPParser`: x/y are 3-wide, palette slot is
-/// 1-wide, palette value is 2-wide, etc. Helper `MN` encodes integers to
-/// base-36 at the requested width.
-private func MN(_ value: Int, _ width: Int) -> String {
-    MegaNum.encode(value, width: width)
-}
-
-/// Wrap a command body in the canonical `!|<body>\n` RIP frame and decode it,
-/// asserting that exactly one command is returned and that it matches the
-/// expected case.
-private func smoke(_ body: String, expect: RIPCommand,
-                   file: StaticString = #file, line: UInt = #line) {
-    do {
-        let cmds = try RIPParser.parse("!|\(body)\n").commands
-        XCTAssertEqual(cmds.count, 1, "expected single command for body=\(body)", file: file, line: line)
-        XCTAssertEqual(cmds.first, expect, file: file, line: line)
-    } catch {
-        XCTFail("decode threw for body=\(body): \(error)", file: file, line: line)
-    }
-}
-
+/// Every command of RIPscrip 1.54, decoded from the "Example:" line of its
+/// section in the specification (with `<escape>` replaced by ESC and the
+/// `^M` notation kept literally), so argument widths and order are checked
+/// against the spec rather than against the encoder.
 final class CommandCoverageTests: XCTestCase {
 
-    // MARK: - Level 0: windows + cursor + clear
-
-    func test_w_textWindow()    { smoke("w" + MN(1,2)+MN(1,2)+MN(10,2)+MN(5,2)+MN(0,1)+MN(1,1),
-                                        expect: .textWindow(x0: 1, y0: 1, x1: 10, y1: 5, wrap: 0, size: 1)) }
-    func test_v_viewport()      { smoke("v" + MN(0,3)+MN(0,3)+MN(639,3)+MN(349,3),
-                                        expect: .viewport(x0: 0, y0: 0, x1: 639, y1: 349)) }
-    func test_star_resetWindows() { smoke("*", expect: .resetWindows) }
-    func test_e_eraseWindow()   { smoke("e", expect: .eraseWindow) }
-    func test_E_eraseView()     { smoke("E", expect: .eraseView) }
-    func test_g_gotoXY()        { smoke("g" + MN(10,3)+MN(20,3),
-                                        expect: .gotoXY(x: 10, y: 20)) }
-    func test_H_home()          { smoke("H", expect: .home) }
-    func test_gt_eraseEOL()     { smoke(">", expect: .eraseEOL) }
-
-    // MARK: - Level 0: color + palette + write mode
-
-    func test_c_color()         { smoke("c" + MN(15,2), expect: .color(15)) }
-    func test_Q_setPalette() {
-        let body = "Q" + (0..<16).map { MN($0, 2) }.joined()
-        smoke(body, expect: .setPalette(Array(0..<16)))
-    }
-    func test_a_onePalette()    { smoke("a" + MN(5,1)+MN(31,2),
-                                        expect: .onePalette(slot: 5, value: 31)) }
-    func test_W_writeMode()     { smoke("W" + MN(1,1), expect: .writeMode(1)) }
-    func test_m_move()          { smoke("m" + MN(7,3)+MN(8,3),
-                                        expect: .move(x: 7, y: 8)) }
-
-    // MARK: - Level 0: text
-
-    func test_T_text()          { smoke("THello", expect: .text("Hello")) }
-    func test_at_textXY()       { smoke("@" + MN(1,3)+MN(2,3) + "Hi",
-                                        expect: .textXY(x: 1, y: 2, string: "Hi")) }
-    func test_Y_fontStyle()     { smoke("Y" + MN(1,2)+MN(0,2)+MN(2,2)+MN(0,2),
-                                        expect: .fontStyle(font: 1, direction: 0, size: 2, reserved: 0)) }
-
-    // MARK: - Level 0: primitives
-
-    func test_X_pixel()         { smoke("X" + MN(10,3)+MN(11,3),
-                                        expect: .pixel(x: 10, y: 11)) }
-    func test_L_line()          { smoke("L" + MN(0,3)+MN(10,3)+MN(36,3)+MN(40,3),
-                                        expect: .line(x0: 0, y0: 10, x1: 36, y1: 40)) }
-    func test_R_rectangle()     { smoke("R" + MN(0,3)+MN(0,3)+MN(36,3)+MN(36,3),
-                                        expect: .rectangle(x0: 0, y0: 0, x1: 36, y1: 36)) }
-    func test_B_bar()           { smoke("B" + MN(0,3)+MN(0,3)+MN(36,3)+MN(36,3),
-                                        expect: .bar(x0: 0, y0: 0, x1: 36, y1: 36)) }
-    func test_C_circle()        { smoke("C" + MN(180,3)+MN(180,3)+MN(36,3),
-                                        expect: .circle(x: 180, y: 180, radius: 36)) }
-    func test_O_oval()          { smoke("O" + MN(180,3)+MN(180,3)+MN(0,3)+MN(360,3)+MN(72,3)+MN(36,3),
-                                        expect: .oval(x: 180, y: 180, startAngle: 0, endAngle: 360, xrad: 72, yrad: 36)) }
-    func test_o_filledOval()    { smoke("o" + MN(180,3)+MN(180,3)+MN(72,3)+MN(36,3),
-                                        expect: .filledOval(x: 180, y: 180, xrad: 72, yrad: 36)) }
-    func test_A_arc()           { smoke("A" + MN(180,3)+MN(180,3)+MN(0,3)+MN(360,3)+MN(36,3),
-                                        expect: .arc(x: 180, y: 180, startAngle: 0, endAngle: 360, radius: 36)) }
-    func test_V_ovalArc()       { smoke("V" + MN(180,3)+MN(180,3)+MN(0,3)+MN(360,3)+MN(72,3)+MN(36,3),
-                                        expect: .ovalArc(x: 180, y: 180, startAngle: 0, endAngle: 360, xrad: 72, yrad: 36)) }
-    func test_I_pieSlice()      { smoke("I" + MN(180,3)+MN(180,3)+MN(0,3)+MN(360,3)+MN(36,3),
-                                        expect: .pieSlice(x: 180, y: 180, startAngle: 0, endAngle: 360, radius: 36)) }
-    func test_i_ovalPieSlice()  { smoke("i" + MN(180,3)+MN(180,3)+MN(0,3)+MN(360,3)+MN(72,3)+MN(36,3),
-                                        expect: .ovalPieSlice(x: 180, y: 180, startAngle: 0, endAngle: 360, xrad: 72, yrad: 36)) }
-    func test_Z_bezier()        { smoke("Z" + MN(0,3)+MN(10,3)+MN(36,3)+MN(36,3)+MN(180,3)+MN(180,3)+MN(36,3)+MN(36,3)+MN(10,2),
-                                        expect: .bezier(x0: 0, y0: 10, x1: 36, y1: 36, x2: 180, y2: 180, x3: 36, y3: 36, count: 10)) }
-
-    // MARK: - Level 0: polygons + fill + styles
-
-    func test_P_polygon() {
-        let pts: [RIPPoint] = [.init(x: 0, y: 0), .init(x: 10, y: 0), .init(x: 10, y: 10)]
-        smoke("P" + MN(pts.count, 2) + pts.map { MN($0.x,3)+MN($0.y,3) }.joined(),
-              expect: .polygon(points: pts))
-    }
-    func test_p_fillPolygon() {
-        let pts: [RIPPoint] = [.init(x: 0, y: 0), .init(x: 10, y: 0), .init(x: 10, y: 10)]
-        smoke("p" + MN(pts.count, 2) + pts.map { MN($0.x,3)+MN($0.y,3) }.joined(),
-              expect: .fillPolygon(points: pts))
-    }
-    func test_l_polyline() {
-        let pts: [RIPPoint] = [.init(x: 0, y: 0), .init(x: 10, y: 10)]
-        smoke("l" + MN(pts.count, 2) + pts.map { MN($0.x,3)+MN($0.y,3) }.joined(),
-              expect: .polyline(points: pts))
-    }
-    func test_F_fill()          { smoke("F" + MN(180,3)+MN(180,3)+MN(7,1),
-                                        expect: .fill(x: 180, y: 180, border: 7)) }
-    func test_eq_lineStyle()    { smoke("=" + MN(0,2)+MN(0,4)+MN(1,2),
-                                        expect: .lineStyle(style: 0, userPattern: 0, thickness: 1)) }
-    func test_S_fillStyle()     { smoke("S" + MN(0,2)+MN(7,2),
-                                        expect: .fillStyle(pattern: 0, color: 7)) }
-    func test_f_fillPattern() {
-        let bytes: [UInt8] = [0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00]
-        smoke("f" + bytes.map { MN(Int($0), 2) }.joined() + MN(7, 2),
-              expect: .fillPattern(bytes: bytes, color: 7))
+    private func check(_ body: String, _ expected: RIPCommand, file: StaticString = #filePath, line: UInt = #line) {
+        do {
+            let commands = try parseBody(body)
+            XCTAssertEqual(commands, [expected], "body: \(body)", file: file, line: line)
+        } catch {
+            XCTFail("\(body) threw \(error)", file: file, line: line)
+        }
     }
 
-    // MARK: - Level 1: text region + image + icon
+    // MARK: - Level 0
 
-    func test_1T_beginText()    { smoke("1T" + MN(0,3)+MN(0,3)+MN(216,3)+MN(216,3)+MN(0,2),
-                                        expect: .beginText(x0: 0, y0: 0, x1: 216, y1: 216, reserved: 0)) }
-    func test_1t_regionText()   { smoke("1t" + MN(2,2) + "Hi",
-                                        expect: .regionText(flags: 2, string: "Hi")) }
-    func test_1E_endText()      { smoke("1E", expect: .endText) }
-    func test_1G_getImage()     { smoke("1G" + MN(0,3)+MN(0,3)+MN(216,3)+MN(216,3)+MN(0,2),
-                                        expect: .getImage(x0: 0, y0: 0, x1: 216, y1: 216, reserved: 0)) }
-    func test_1P_putImage()     { smoke("1P" + MN(0,3)+MN(216,3)+MN(1,1)+MN(0,2),
-                                        expect: .putImage(x: 0, y: 216, mode: 1, reserved: 0)) }
-    func test_1W_writeIcon()    { smoke("1WLOGO.ICN",
-                                        expect: .writeIcon(filename: "LOGO.ICN")) }
-    func test_1I_loadIcon()     { smoke("1I" + MN(0,3)+MN(216,3)+MN(0,1)+MN(1,1)+MN(0,2) + "LOGO.ICN",
-                                        expect: .loadIcon(x: 0, y: 216, mode: 0, clipboard: 1, reserved: 0, filename: "LOGO.ICN")) }
-
-    // MARK: - Level 1: buttons + mouse + define/query
-
-    func test_1B_buttonStyle()  {
-        let body = "1B" + MN(216,3)+MN(72,3)+MN(0,2)+MN(1,4)+MN(1,2)+MN(0,2)+MN(0,2)+MN(15,2)+MN(8,2)+MN(7,2)+MN(7,2)+MN(7,2)+MN(7,2)+MN(0,2)+MN(0,2) + "label"
-        smoke(body, expect: .buttonStyle(width: 216, height: 72, orientation: 0, flags: 1, bevelSize: 1, dfore: 0, dback: 0, bright: 15, dark: 8, surface: 7, gborder: 7, gcorner: 7, uline: 7, corner: 0, reserved: 0, label: "label"))
+    func testTextWindow() { check("w00001B0M10", .textWindow(x0: 0, y0: 0, x1: 47, y1: 22, wrap: 1, size: 0)) }
+    func testViewport() { check("v00002E1M", .viewport(x0: 0, y0: 0, x1: 86, y1: 58)) }
+    func testResetWindows() { check("*", .resetWindows) }
+    func testEraseWindow() { check("e", .eraseWindow) }
+    func testEraseView() { check("E", .eraseView) }
+    func testGotoXY() { check("g0509", .gotoXY(x: 5, y: 9)) }
+    func testHome() { check("H", .home) }
+    func testEraseEOL() { check(">", .eraseEOL) }
+    /// The spec's example uses a one-digit variable-width last parameter.
+    func testColor() { check("cA", .color(10)) }
+    func testSetPalette() {
+        check("Q000102030405060708090A0B0C0D0E0F", .setPalette(Array(0...15)))
     }
-    func test_1U_button()       { smoke("1U" + MN(0,3)+MN(0,3)+MN(216,3)+MN(216,3)+MN(0x41,2)+MN(0,3) + "Login",
-                                        expect: .button(x0: 0, y0: 0, x1: 216, y1: 216, hotkey: 0x41, flags: 0, label: "Login")) }
-    func test_1M_mouse()        { smoke("1M" + MN(1,2)+MN(0,3)+MN(0,3)+MN(216,3)+MN(216,3)+MN(1,1)+MN(1,1) + "Hello|GO MAIN",
-                                        expect: .mouse(num: 1, x0: 0, y0: 0, x1: 216, y1: 216, click: 1, clear: 1, text: "Hello", hostCommand: "GO MAIN")) }
-    func test_1K_killMouseFields() { smoke("1K", expect: .killMouseFields) }
-    func test_1D_define()       { smoke("1D" + MN(36,3)+MN(0,2) + "MyMacro",
-                                        expect: .define(id: 36, flags: 0, string: "MyMacro")) }
-    func test_1q_query()        { smoke("1?" + MN(0,2) + "GET STATUS",
-                                        expect: .query(flags: 0, string: "GET STATUS")) }
-    func test_1C_copyRegion()   { smoke("1C" + MN(0,3)+MN(0,3)+MN(216,3)+MN(216,3)+MN(1,1)+MN(36,3)+MN(72,3),
-                                        expect: .copyRegion(x0: 0, y0: 0, x1: 216, y1: 216, destPage: 1, destX: 36, destY: 72)) }
-    func test_1R_readScene()    { smoke("1RNEXT.RIP",
-                                        expect: .readScene(filename: "NEXT.RIP")) }
-    func test_1F_fileQuery()    { smoke("1FREADER.TXT|" + MN(0,2),
-                                        expect: .fileQuery(filename: "READER.TXT", reserved: 0)) }
+    func testOnePalette() { check("a051B", .onePalette(slot: 5, value: 47)) }
+    func testWriteMode() { check("W00", .writeMode(0)) }
+    func testMove() { check("m0509", .move(x: 5, y: 9)) }
+    func testText() { check("Thello world", .text("hello world")) }
+    func testTextXY() { check("@0011hello world", .textXY(x: 0, y: 37, string: "hello world")) }
+    func testFontStyle() { check("Y01000400", .fontStyle(font: 1, direction: 0, size: 4, reserved: 0)) }
+    func testPixel() { check("X1122", .pixel(x: 37, y: 74)) }
+    func testLine() { check("L00010A0E", .line(x0: 0, y0: 1, x1: 10, y1: 14)) }
+    func testRectangle() { check("R00010A0E", .rectangle(x0: 0, y0: 1, x1: 10, y1: 14)) }
+    func testBar() { check("B00010A0E", .bar(x0: 0, y0: 1, x1: 10, y1: 14)) }
+    func testCircle() { check("C1E180M", .circle(x: 50, y: 44, radius: 22)) }
+    func testOval() {
+        // The spec's example omits the "!|O" prefix and carries two extra
+        // digits after the six arguments, which are ignored (rule 6).
+        check("O1E1A18003G150Z", .oval(x: 50, y: 46, startAngle: 44, endAngle: 0, xrad: 124, yrad: 41))
+    }
+    func testFilledOval() { check("o1G2B0M0G", .filledOval(x: 52, y: 83, xrad: 22, yrad: 16)) }
+    func testArc() { check("A1E18003G15", .arc(x: 50, y: 44, startAngle: 0, endAngle: 124, radius: 41)) }
+    func testOvalArc() {
+        check("V1E18003G151Q", .ovalArc(x: 50, y: 44, startAngle: 0, endAngle: 124, xrad: 41, yrad: 62))
+    }
+    func testPieSlice() { check("I1E18003G15", .pieSlice(x: 50, y: 44, startAngle: 0, endAngle: 124, radius: 41)) }
+    func testOvalPieSlice() {
+        check("i1E18003G151Q", .ovalPieSlice(x: 50, y: 44, startAngle: 0, endAngle: 124, xrad: 41, yrad: 62))
+    }
+    func testBezier() {
+        check("Z0A0B0C0D0E0F0G0H1G", .bezier(x0: 10, y0: 11, x1: 12, y1: 13, x2: 14, y2: 15, x3: 16, y3: 17, count: 52))
+    }
+    func testPolygon() {
+        check("P03010105090905", .polygon(points: [RIPPoint(x: 1, y: 1), RIPPoint(x: 5, y: 9), RIPPoint(x: 9, y: 5)]))
+    }
+    func testFillPolygon() {
+        check("p03010105050909", .fillPolygon(points: [RIPPoint(x: 1, y: 1), RIPPoint(x: 5, y: 5), RIPPoint(x: 9, y: 9)]))
+    }
+    func testPolyline() {
+        check("l03010105090905", .polyline(points: [RIPPoint(x: 1, y: 1), RIPPoint(x: 5, y: 9), RIPPoint(x: 9, y: 5)]))
+    }
+    func testFill() { check("F25090F", .fill(x: 77, y: 9, border: 15)) }
+    func testLineStyle() { check("=01000001", .lineStyle(style: 1, userPattern: 0, thickness: 1)) }
+    func testFillStyle() { check("S050F", .fillStyle(pattern: 5, color: 15)) }
+    func testFillPattern() {
+        check("s11223344556677880F",
+              .fillPattern(bytes: [37, 74, 111, 148, 185, 222, 3, 40], color: 15)) // 259, 296 truncate to 8 bits
+    }
+    func testNoMore() { check("#", .noMore) }
 
-    // MARK: - Level 9: block mode
+    // MARK: - Level 1
 
-    func test_9lt_enterBlockMode() { smoke("9<" + MN(1,1)+MN(2,2)+MN(0,4) + "FILE.ICN",
-                                           expect: .enterBlockMode(mode: 1, fileType: 2, reserved: 0, filename: "FILE.ICN")) }
-    func test_9N_noMore()       { smoke("9NoMore", expect: .noMore) }
+    func testMouse() {
+        check("1M00001122331100000host command^M",
+              .mouse(num: 0, x0: 0, y0: 37, x1: 74, y1: 111, click: 1, clear: 1, reserved: 0, hostCommand: "host command^M"))
+    }
+    func testKillMouseFields() { check("1K", .killMouseFields) }
+    /// The spec's example omits the trailing `res:2`; a missing last numeric
+    /// parameter decodes as 0.
+    func testBeginText() { check("1T00110011", .beginText(x0: 0, y0: 37, x1: 0, y1: 37, reserved: 0)) }
+    func testRegionText() {
+        check("1t1This is a text line to be justified", .regionText(justify: 1, string: "This is a text line to be justified"))
+    }
+    func testEndText() { check("1E", .endText) }
+    func testGetImage() { check("1C001122330", .getImage(x0: 0, y0: 37, x1: 74, y1: 111, reserved: 0)) }
+    func testPutImage() { check("1P0011010", .putImage(x: 0, y: 37, mode: 1, reserved: 0)) }
+    func testWriteIcon() { check("1W0filename.icn", .writeIcon(reserved: 0, filename: "filename.icn")) }
+    func testLoadIcon() {
+        check("1I001101010button.icn", .loadIcon(x: 0, y: 37, mode: 1, clipboard: 0, reserved: 36, filename: "button.icn"))
+    }
+    func testButtonStyle() {
+        check("1B0A0A010274030F080F080700010E07000000", .buttonStyle(RIPButtonStyle(
+            width: 10, height: 10, orientation: 1, flags: 2 * 1296 + 7 * 36 + 4, bevelSize: 3,
+            labelColor: 15, dropShadowColor: 8, brightColor: 15, darkColor: 8, surfaceColor: 7,
+            groupNumber: 0, flags2: 1, underlineColor: 14, cornerColor: 7, reserved: 0)))
+    }
+    func testButton() {
+        check("1U010100003200iconfile<>Label<>HostCmd^m",
+              .button(x0: 1, y0: 1, x1: 0, y1: 0, hotkey: 110, flags: 0, reserved: 0, text: "iconfile<>Label<>HostCmd^m"))
+    }
+    func testDefine() {
+        check("1D00700text_var,60:?question?default data",
+              .define(flags: 7, reserved: 0, text: "text_var,60:?question?default data"))
+    }
+    func testQuery() {
+        check("1\u{1B}0000this is a query $COMMAND$^m", .query(mode: 0, reserved: 0, text: "this is a query $COMMAND$^m"))
+    }
+    func testCopyRegion() {
+        check("1G080G140M0005", .copyRegion(x0: 8, y0: 16, x1: 40, y1: 22, reserved: 0, destLine: 5))
+    }
+    func testReadScene() { check("1R00000000testfile.rip", .readScene(reserved: 0, filename: "testfile.rip")) }
+    func testFileQuery() { check("1F010000testfile.icn", .fileQuery(mode: 1, reserved: 0, filename: "testfile.icn")) }
+
+    // MARK: - Level 9
+
+    func testEnterBlockMode() {
+        check("9\u{1B}00010000ICONFILE.ICN<>",
+              .enterBlockMode(mode: 0, transferProtocol: 0, fileType: 1, reserved: 0, filename: "ICONFILE.ICN"))
+        check("9\u{1B}06040000<>", .enterBlockMode(mode: 0, transferProtocol: 6, fileType: 4, reserved: 0, filename: ""))
+    }
+
+    // MARK: - Unknown / sub-level
+
+    func testSubLevelCommandIsUnknown() {
+        check("15Labc", .unknown(level: "15", command: "L", arguments: "abc"))
+        check("9N", .unknown(level: "9", command: "N", arguments: ""))
+    }
 }

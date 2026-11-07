@@ -1,130 +1,236 @@
-// RIPCanvas — 640x350 RGBA8 raster framebuffer plus the geometric primitives
-// the RIPscrip spec requires.
+// RIPCanvas — the palette-indexed 640x350 framebuffer and the raster
+// primitives the interpreter draws with.
 //
-// The canvas is the renderer's draw target. Every spec primitive (line, arc,
-// flood-fill, etc.) plots into this buffer using the active `RIPGraphicsState`
-// at the moment of the call. Coordinates are framebuffer pixels with origin
-// at the top-left (RIPscrip convention).
+// The canvas stores one palette index (0...15) per pixel. RGB is derived
+// only when a snapshot is taken, so palette commands are O(1) and XOR,
+// flood fill and PUT_IMAGE logic operate on palette indexes exactly like
+// the EGA planes they model.
 //
-// We deliberately implement these primitives by hand rather than handing off
-// to CoreGraphics for two reasons:
-//
-//   1. We need pixel-exact behavior: line patterns are 16-bit masks of
-//      individual pixels, flood-fill must stop on a specific palette index
-//      (not an RGB value), and XOR write-mode must XOR palette indices, not
-//      composited RGBA.
-//   2. We need to honour the spec's "Uses Viewport / Uses Write Mode / Uses
-//      Line Pattern / Uses Fill Pattern" table on a per-pixel basis.
-//
-// A `CGImage` snapshot is provided for callers that just want the result as
-// a system image.
+// All primitives take absolute screen coordinates and an explicit clip
+// rectangle; every loop is bounded by the clip rectangle or by the
+// (clamped) size of the primitive, never by unbounded input values.
 
 import Foundation
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 
-/// Pixel-addressable 640x350 RGBA8 framebuffer.
-public final class RIPCanvas {
-
-    public static let nativeWidth: Int = 640
-    public static let nativeHeight: Int = 350
-
-    /// Active framebuffer width in pixels.
+/// An immutable snapshot of the native RIPscrip framebuffer.
+public struct RIPFramebuffer: Equatable, Sendable {
+    /// Width in pixels (640).
     public let width: Int
-    /// Active framebuffer height in pixels.
+    /// Height in pixels (350).
     public let height: Int
+    /// One palette index (0...15) per pixel, row-major from the top-left.
+    public let indexed: [UInt8]
+    /// The 16-entry palette (master-palette values) in effect.
+    public let palette: [UInt8]
 
-    /// Palette-indexed plane. One byte per pixel, value is a palette slot
-    /// (0..15). Maintained alongside the RGBA plane so flood-fill and XOR
-    /// can operate in palette space.
-    public private(set) var indexed: [UInt8]
-
-    /// 32-bit RGBA8 framebuffer, premultiplied alpha, row-major.
-    public private(set) var rgba: [UInt8]
-
-    /// Active palette used to keep `rgba` in sync with `indexed`. Updated by
-    /// the interpreter whenever a palette mutation happens; the canvas
-    /// re-derives RGB on demand.
-    public var palette: [UInt8] = RIPPalette.default16
-
-    /// Create a fresh canvas, cleared to palette index 0 (black in the
-    /// default palette).
-    public init(width: Int = RIPCanvas.nativeWidth, height: Int = RIPCanvas.nativeHeight) {
+    /// Create a framebuffer from raw values.
+    /// - Parameters:
+    ///   - width: Width in pixels.
+    ///   - height: Height in pixels.
+    ///   - indexed: `width * height` palette indexes.
+    ///   - palette: 16 master-palette values.
+    public init(width: Int, height: Int, indexed: [UInt8], palette: [UInt8]) {
         self.width = width
         self.height = height
-        self.indexed = [UInt8](repeating: 0, count: width * height)
-        self.rgba = [UInt8](repeating: 0, count: width * height * 4)
-        // Default-clear alpha to 255 so the buffer is opaque on snapshot.
-        for i in 0..<(width * height) {
-            rgba[i * 4 + 3] = 255
-        }
+        self.indexed = indexed
+        self.palette = palette
     }
 
-    /// Fill the entire framebuffer with one palette index.
-    public func clear(to color: UInt8) {
-        for i in 0..<indexed.count { indexed[i] = color }
-        refreshRGBA()
-    }
-
-    /// Refresh the RGBA plane from the indexed plane using the current
-    /// `palette`. O(w*h).
-    public func refreshRGBA() {
-        for i in 0..<indexed.count {
-            writeRGBA(i, color: indexed[i])
-        }
-    }
-
-    @inline(__always)
-    private func writeRGBA(_ i: Int, color: UInt8) {
-        let rgb = RIPPalette.resolve(color, in: palette)
-        let o = i * 4
-        rgba[o + 0] = rgb.r
-        rgba[o + 1] = rgb.g
-        rgba[o + 2] = rgb.b
-        rgba[o + 3] = 255
-    }
-
-    // MARK: - Primitives — single pixel
-
-    /// Plot a single pixel honoring viewport clip and write mode. `state` is
-    /// passed so write-mode + viewport apply uniformly.
-    public func setPixel(x: Int, y: Int, color: UInt8, state: RIPGraphicsState) {
-        guard (0..<width).contains(x), (0..<height).contains(y) else { return }
-        let clip = state.viewport.clipRect()
-        if x < clip.x0 || x > clip.x1 || y < clip.y0 || y > clip.y1 { return }
-        let i = y * width + x
-        let dst = indexed[i]
-        let plotted: UInt8
-        switch state.writeMode {
-        case .copy: plotted = color
-        case .xor:  plotted = dst ^ color
-        }
-        indexed[i] = plotted
-        writeRGBA(i, color: plotted)
-    }
-
-    /// Raw indexed-plane read without viewport check. Used by flood-fill.
-    @inline(__always)
-    func rawIndex(x: Int, y: Int) -> UInt8 {
+    /// Palette index at `(x, y)`, or `nil` outside the framebuffer.
+    public func colorIndex(x: Int, y: Int) -> UInt8? {
+        guard x >= 0, y >= 0, x < width, y < height, y * width + x < indexed.count else { return nil }
         return indexed[y * width + x]
     }
 
-    // MARK: - Line drawing
+    /// RGBA8 pixels (opaque, row-major), resolved through ``palette``.
+    public var rgba: [UInt8] {
+        let lut = (0..<16).map { RIPPalette.resolve(UInt8($0), in: palette) }
+        var out = [UInt8](repeating: 255, count: indexed.count * 4)
+        for (i, index) in indexed.enumerated() {
+            let c = lut[Int(index & 0x0F)]
+            out[i * 4] = c.r
+            out[i * 4 + 1] = c.g
+            out[i * 4 + 2] = c.b
+        }
+        return out
+    }
 
-    /// Bresenham line with thickness, pattern, and write mode honored.
-    public func drawLine(x0: Int, y0: Int, x1: Int, y1: Int, color: UInt8, state: RIPGraphicsState) {
-        let mask = lineMask(for: state.lineStyle)
-        var bit = 0
+    #if canImport(CoreGraphics)
+    /// The framebuffer as an sRGB `CGImage` (RGBA8, opaque).
+    public func cgImage() -> CGImage? {
+        RIPFramebuffer.makeImage(rgba: rgba, width: width, height: height)
+    }
+
+    static func makeImage(rgba: [UInt8], width: Int, height: Int) -> CGImage? {
+        guard width > 0, height > 0, rgba.count == width * height * 4,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: width * 4, space: space,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false,
+                       intent: .defaultIntent)
+    }
+    #endif
+}
+
+/// Inclusive clip rectangle in absolute pixels.
+struct ClipRect: Equatable {
+    var x0: Int
+    var y0: Int
+    var x1: Int
+    var y1: Int
+
+    var isEmpty: Bool { x0 > x1 || y0 > y1 }
+
+    @inline(__always)
+    func contains(_ x: Int, _ y: Int) -> Bool {
+        x >= x0 && x <= x1 && y >= y0 && y <= y1
+    }
+
+    func intersection(_ o: ClipRect) -> ClipRect {
+        ClipRect(x0: Swift.max(x0, o.x0), y0: Swift.max(y0, o.y0),
+                 x1: Swift.min(x1, o.x1), y1: Swift.min(y1, o.y1))
+    }
+}
+
+/// A fill pattern resolved for drawing: set bits use `color`, clear bits
+/// use the background color 0.
+struct FillSpec {
+    let rows: [UInt8]
+    let color: UInt8
+
+    @inline(__always)
+    func color(atX x: Int, y: Int) -> UInt8 {
+        let row = rows[y & 7]
+        return (row >> UInt8(7 - (x & 7))) & 1 == 1 ? color : 0
+    }
+}
+
+/// A line pen: color, write mode, 16-bit pattern and thickness (1 or 3).
+struct Pen {
+    var color: UInt8
+    var mode: RIPWriteMode = .copy
+    var mask: UInt16 = 0xFFFF
+    var thickness: Int = 1
+}
+
+/// Mutable palette-indexed framebuffer used while rendering.
+final class RIPCanvas {
+
+    static let nativeWidth = 640
+    static let nativeHeight = 350
+
+    let width: Int
+    let height: Int
+    /// One palette index per pixel.
+    private(set) var indexed: [UInt8]
+    /// Active palette (16 master values); used only for snapshots.
+    var palette: [UInt8] = RIPPalette.default16
+    /// Number of pixel writes performed so far (the render work budget).
+    private(set) var pixelWrites = 0
+    /// Flood-fill visitation stamps (one generation per fill).
+    private var stamps: [UInt32] = []
+    private var stampGeneration: UInt32 = 0
+
+    init(width: Int = RIPCanvas.nativeWidth, height: Int = RIPCanvas.nativeHeight) {
+        self.width = width
+        self.height = height
+        self.indexed = [UInt8](repeating: 0, count: width * height)
+    }
+
+    var screen: ClipRect { ClipRect(x0: 0, y0: 0, x1: width - 1, y1: height - 1) }
+
+    /// Immutable snapshot.
+    var framebuffer: RIPFramebuffer {
+        RIPFramebuffer(width: width, height: height, indexed: indexed, palette: palette)
+    }
+
+    /// RGBA8 view of the current pixels (convenience for tests).
+    var rgba: [UInt8] { framebuffer.rgba }
+
+    // MARK: - Pixels
+
+    @inline(__always)
+    func index(x: Int, y: Int) -> UInt8 { indexed[y * width + x] }
+
+    /// Fill the whole canvas with one palette index.
+    func clear(to color: UInt8) {
+        for i in indexed.indices { indexed[i] = color }
+        pixelWrites += indexed.count
+    }
+
+    /// Plot one pixel if it lies inside `clip` (which must be on-screen).
+    @inline(__always)
+    func plot(_ x: Int, _ y: Int, _ color: UInt8, _ mode: RIPWriteMode, _ clip: ClipRect) {
+        guard clip.contains(x, y) else { return }
+        let i = y * width + x
+        indexed[i] = mode == .xor ? (indexed[i] ^ color) & 0x0F : color & 0x0F
+        pixelWrites += 1
+    }
+
+    /// Fill a rectangle (inclusive) with a pattern, copy mode.
+    func fillRect(x0: Int, y0: Int, x1: Int, y1: Int, fill: FillSpec, clip: ClipRect) {
+        let r = ClipRect(x0: Swift.min(x0, x1), y0: Swift.min(y0, y1),
+                         x1: Swift.max(x0, x1), y1: Swift.max(y0, y1)).intersection(clip)
+        guard !r.isEmpty else { return }
+        for y in r.y0...r.y1 {
+            span(y: y, from: r.x0, to: r.x1, fill: fill, clip: clip)
+        }
+    }
+
+    /// Fill one horizontal span with a pattern, copy mode.
+    @inline(__always)
+    func span(y: Int, from xa: Int, to xb: Int, fill: FillSpec, clip: ClipRect) {
+        guard y >= clip.y0, y <= clip.y1 else { return }
+        let lo = Swift.max(Swift.min(xa, xb), clip.x0)
+        let hi = Swift.min(Swift.max(xa, xb), clip.x1)
+        guard lo <= hi else { return }
+        let base = y * width
+        for x in lo...hi {
+            indexed[base + x] = fill.color(atX: x, y: y)
+        }
+        pixelWrites += hi - lo + 1
+    }
+
+    // MARK: - Lines
+
+    /// Bresenham line. Thickness 3 draws three parallel lines offset along
+    /// the minor axis (as BGI does); the pattern's MSB is plotted first.
+    func line(_ x0: Int, _ y0: Int, _ x1: Int, _ y1: Int, pen: Pen, clip: ClipRect) {
+        if pen.thickness >= 3 {
+            let steep = abs(y1 - y0) > abs(x1 - x0)
+            for d in -1...1 {
+                if steep {
+                    thinLine(x0 + d, y0, x1 + d, y1, pen: pen, clip: clip)
+                } else {
+                    thinLine(x0, y0 + d, x1, y1 + d, pen: pen, clip: clip)
+                }
+            }
+        } else {
+            thinLine(x0, y0, x1, y1, pen: pen, clip: clip)
+        }
+    }
+
+    private func thinLine(_ x0: Int, _ y0: Int, _ x1: Int, _ y1: Int, pen: Pen, clip: ClipRect) {
+        // Trivially reject lines entirely on one side of the clip rectangle.
+        if (x0 < clip.x0 && x1 < clip.x0) || (x0 > clip.x1 && x1 > clip.x1) ||
+            (y0 < clip.y0 && y1 < clip.y0) || (y0 > clip.y1 && y1 > clip.y1) { return }
         var x = x0, y = y0
         let dx = abs(x1 - x0)
         let dy = -abs(y1 - y0)
         let sx = x0 < x1 ? 1 : -1
         let sy = y0 < y1 ? 1 : -1
         var err = dx + dy
+        var bit = 15
         while true {
-            if mask == 0xFFFF || ((mask >> (bit & 15)) & 1) == 1 {
-                plotThick(x: x, y: y, color: color, state: state)
+            if (pen.mask >> UInt16(bit)) & 1 == 1 {
+                plot(x, y, pen.color, pen.mode, clip)
             }
-            bit += 1
+            bit = bit == 0 ? 15 : bit - 1
             if x == x1 && y == y1 { break }
             let e2 = 2 * err
             if e2 >= dy { err += dy; x += sx }
@@ -132,336 +238,182 @@ public final class RIPCanvas {
         }
     }
 
-    /// Pixel-square brush of `state.lineThickness` width centered on (x,y).
-    private func plotThick(x: Int, y: Int, color: UInt8, state: RIPGraphicsState) {
-        let t = max(1, state.lineThickness)
-        if t == 1 {
-            setPixel(x: x, y: y, color: color, state: state)
+    // MARK: - Ellipses
+
+    /// Ellipse outline (copy mode, solid). Thickness 3 adds the radii +/- 1.
+    func ellipse(cx: Int, cy: Int, rx: Int, ry: Int, color: UInt8, thickness: Int, clip: ClipRect) {
+        if thickness >= 3 {
+            for d in -1...1 {
+                thinEllipse(cx: cx, cy: cy, rx: Swift.max(0, rx + d), ry: Swift.max(0, ry + d), color: color, clip: clip)
+            }
+        } else {
+            thinEllipse(cx: cx, cy: cy, rx: rx, ry: ry, color: color, clip: clip)
+        }
+    }
+
+    private func thinEllipse(cx: Int, cy: Int, rx: Int, ry: Int, color: UInt8, clip: ClipRect) {
+        if cx + rx < clip.x0 || cx - rx > clip.x1 || cy + ry < clip.y0 || cy - ry > clip.y1 { return }
+        func plot4(_ dx: Int, _ dy: Int) {
+            plot(cx + dx, cy + dy, color, .copy, clip)
+            plot(cx - dx, cy + dy, color, .copy, clip)
+            plot(cx + dx, cy - dy, color, .copy, clip)
+            plot(cx - dx, cy - dy, color, .copy, clip)
+        }
+        if rx == 0 || ry == 0 {
+            line(cx - rx, cy - ry, cx + rx, cy + ry, pen: Pen(color: color), clip: clip)
             return
         }
-        let half = t / 2
-        for dy in -half..<(t - half) {
-            for dx in -half..<(t - half) {
-                setPixel(x: x + dx, y: y + dy, color: color, state: state)
-            }
+        let fx = Double(rx), fy = Double(ry)
+        for dx in 0...rx {
+            let t = Double(dx) / fx
+            plot4(dx, Int((fy * (1 - t * t).squareRoot()).rounded()))
+        }
+        for dy in 0...ry {
+            let t = Double(dy) / fy
+            plot4(Int((fx * (1 - t * t).squareRoot()).rounded()), dy)
         }
     }
 
-    private func lineMask(for style: RIPLineStyle) -> UInt16 {
-        switch style {
-        case .predefined(let i):
-            switch i {
-            case 0: return 0xFFFF // solid
-            case 1: return 0x3333 // dotted
-            case 2: return 0x1E3F // center
-            case 3: return 0x1F1F // dashed
-            default: return 0xFFFF
-            }
-        case .user(let m):
-            return m
+    /// Filled ellipse interior (copy mode, pattern).
+    func fillEllipse(cx: Int, cy: Int, rx: Int, ry: Int, fill: FillSpec, clip: ClipRect) {
+        guard ry >= 0, rx >= 0 else { return }
+        let top = Swift.max(-ry, clip.y0 - cy)
+        let bottom = Swift.min(ry, clip.y1 - cy)
+        guard top <= bottom else { return }
+        let fx = Double(rx), fy = Double(Swift.max(ry, 1))
+        for dy in top...bottom {
+            let t = Double(dy) / fy
+            let half = Int((fx * Swift.max(0, 1 - t * t).squareRoot()).rounded())
+            span(y: cy + dy, from: cx - half, to: cx + half, fill: fill, clip: clip)
         }
     }
 
-    // MARK: - Rectangle
+    // MARK: - Polygons
 
-    public func drawRectangle(x0: Int, y0: Int, x1: Int, y1: Int, color: UInt8, state: RIPGraphicsState) {
-        drawLine(x0: x0, y0: y0, x1: x1, y1: y0, color: color, state: state)
-        drawLine(x0: x1, y0: y0, x1: x1, y1: y1, color: color, state: state)
-        drawLine(x0: x1, y0: y1, x1: x0, y1: y1, color: color, state: state)
-        drawLine(x0: x0, y0: y1, x1: x0, y1: y0, color: color, state: state)
-    }
-
-    public func fillRectangle(x0: Int, y0: Int, x1: Int, y1: Int, state: RIPGraphicsState) {
-        let lx = min(x0, x1), rx = max(x0, x1)
-        let ty = min(y0, y1), by = max(y0, y1)
-        for y in ty...by {
-            for x in lx...rx {
-                let c = patternColor(at: x, y: y, state: state)
-                setPixel(x: x, y: y, color: c, state: state)
-            }
-        }
-    }
-
-    /// Sample the fill pattern at (x,y) returning the palette index to plot.
-    private func patternColor(at x: Int, y: Int, state: RIPGraphicsState) -> UInt8 {
-        let bytes = patternBytes(for: state.fillPattern)
-        let row = bytes[y & 7]
-        let bit = (row >> (7 - (x & 7))) & 1
-        return bit == 1 ? state.fillColor : state.drawColor
-    }
-
-    private func patternBytes(for fill: RIPFillPattern) -> [UInt8] {
-        switch fill {
-        case .custom(let b):
-            // Pad or truncate to 8 bytes defensively.
-            var out = b
-            if out.count < 8 { out.append(contentsOf: [UInt8](repeating: 0, count: 8 - out.count)) }
-            if out.count > 8 { out = Array(out.prefix(8)) }
-            return out
-        case .predefined(let i):
-            return Self.predefinedPatterns[max(0, min(11, i))]
-        }
-    }
-
-    /// Spec's 12 predefined fill patterns expressed as 8x8 1-bit rasters.
-    /// Pattern 0 = empty (all 0), 1 = solid (all 1), 2..11 follow the
-    /// canonical BGI/RIP pattern list (line, lt-slash, slash, bk-slash,
-    /// lt-bk-slash, hatch, x-hatch, interleave, wide-dot, close-dot, user
-    /// placeholder).
-    static let predefinedPatterns: [[UInt8]] = [
-        /* 0  empty       */ [0,0,0,0,0,0,0,0],
-        /* 1  solid       */ [0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF],
-        /* 2  line        */ [0xFF,0xFF,0,0,0xFF,0xFF,0,0],
-        /* 3  lt-slash    */ [0x10,0x20,0x40,0x80,0x01,0x02,0x04,0x08],
-        /* 4  slash       */ [0x70,0xE0,0xC1,0x83,0x07,0x0E,0x1C,0x38],
-        /* 5  bk-slash    */ [0x07,0x0E,0x1C,0x38,0x70,0xE0,0xC1,0x83],
-        /* 6  lt-bk-slash */ [0x80,0x40,0x20,0x10,0x08,0x04,0x02,0x01],
-        /* 7  hatch       */ [0x22,0x22,0xFF,0x22,0x22,0x22,0xFF,0x22],
-        /* 8  x-hatch     */ [0x81,0x42,0x24,0x18,0x18,0x24,0x42,0x81],
-        /* 9  interleave  */ [0xCC,0x33,0xCC,0x33,0xCC,0x33,0xCC,0x33],
-        /* 10 wide-dot    */ [0x80,0x00,0x08,0x00,0x80,0x00,0x08,0x00],
-        /* 11 close-dot   */ [0x88,0x00,0x22,0x00,0x88,0x00,0x22,0x00]
-    ]
-
-    // MARK: - Polygon
-
-    public func drawPolygon(points: [RIPPoint], color: UInt8, state: RIPGraphicsState) {
-        guard points.count >= 2 else { return }
-        for i in 0..<points.count {
-            let a = points[i]
-            let b = points[(i + 1) % points.count]
-            drawLine(x0: a.x, y0: a.y, x1: b.x, y1: b.y, color: color, state: state)
-        }
-    }
-
-    public func drawPolyline(points: [RIPPoint], color: UInt8, state: RIPGraphicsState) {
-        guard points.count >= 2 else { return }
-        for i in 0..<(points.count - 1) {
-            drawLine(x0: points[i].x, y0: points[i].y,
-                     x1: points[i + 1].x, y1: points[i + 1].y,
-                     color: color, state: state)
-        }
-    }
-
-    public func fillPolygon(points: [RIPPoint], state: RIPGraphicsState) {
+    /// Even-odd scanline fill of a closed polygon (copy mode, pattern).
+    func fillPolygon(_ points: [RIPPoint], fill: FillSpec, clip: ClipRect) {
         guard points.count >= 3 else { return }
-        // Scanline fill with even-odd rule.
-        let minY = max(0, points.map(\.y).min() ?? 0)
-        let maxY = min(height - 1, points.map(\.y).max() ?? 0)
-        for y in minY...maxY {
-            var crossings: [Int] = []
+        var minY = Int.max, maxY = Int.min
+        for p in points { minY = Swift.min(minY, p.y); maxY = Swift.max(maxY, p.y) }
+        let top = Swift.max(minY, clip.y0), bottom = Swift.min(maxY, clip.y1)
+        guard top <= bottom else { return }
+        var crossings: [Int] = []
+        crossings.reserveCapacity(points.count)
+        for y in top...bottom {
+            crossings.removeAll(keepingCapacity: true)
+            let sampleY = Double(y) + 0.5
             for i in 0..<points.count {
                 let a = points[i]
                 let b = points[(i + 1) % points.count]
-                if (a.y <= y && b.y > y) || (b.y <= y && a.y > y) {
-                    let dy = b.y - a.y
-                    if dy == 0 { continue }
-                    let x = a.x + (y - a.y) * (b.x - a.x) / dy
-                    crossings.append(x)
+                let ay = Double(a.y), by = Double(b.y)
+                if (ay <= sampleY && by > sampleY) || (by <= sampleY && ay > sampleY) {
+                    let x = Double(a.x) + (sampleY - ay) * Double(b.x - a.x) / (by - ay)
+                    crossings.append(Int(x.rounded()))
                 }
             }
             crossings.sort()
             var i = 0
             while i + 1 < crossings.count {
-                let xs = max(0, crossings[i])
-                let xe = min(width - 1, crossings[i + 1])
-                if xs <= xe {
-                    for x in xs...xe {
-                        let c = patternColor(at: x, y: y, state: state)
-                        setPixel(x: x, y: y, color: c, state: state)
-                    }
-                }
+                span(y: y, from: crossings[i], to: crossings[i + 1], fill: fill, clip: clip)
                 i += 2
             }
-        }
-        // Border in current draw color.
-        drawPolygon(points: points, color: state.drawColor, state: state)
-    }
-
-    // MARK: - Circle / ellipse / arc
-
-    /// Midpoint ellipse rasteriser; circle is the special case xrad==yrad
-    /// after applying the spec's aspect ratio.
-    public func drawEllipse(cx: Int, cy: Int, xrad: Int, yrad: Int, color: UInt8, state: RIPGraphicsState) {
-        guard xrad > 0 && yrad > 0 else {
-            setPixel(x: cx, y: cy, color: color, state: state); return
-        }
-        var x = 0, y = yrad
-        let a2 = xrad * xrad
-        let b2 = yrad * yrad
-        var dx = 0
-        var dy = 2 * a2 * y
-        var d1 = b2 - (a2 * yrad) + (a2 / 4)
-        while dx < dy {
-            plotEllipsePoints(cx: cx, cy: cy, x: x, y: y, color: color, state: state)
-            if d1 < 0 {
-                x += 1; dx += 2 * b2; d1 += dx + b2
-            } else {
-                x += 1; y -= 1
-                dx += 2 * b2; dy -= 2 * a2
-                d1 += dx - dy + b2
-            }
-        }
-        var d2 = Int(Double(b2) * (Double(x) + 0.5) * (Double(x) + 0.5) + Double(a2) * Double(y - 1) * Double(y - 1) - Double(a2 * b2))
-        while y >= 0 {
-            plotEllipsePoints(cx: cx, cy: cy, x: x, y: y, color: color, state: state)
-            if d2 > 0 {
-                y -= 1; dy -= 2 * a2; d2 += a2 - dy
-            } else {
-                y -= 1; x += 1
-                dx += 2 * b2; dy -= 2 * a2
-                d2 += dx - dy + a2
-            }
-        }
-    }
-
-    /// RIPscrip uses a 4:3 aspect ratio for `circle` — yrad = round(xrad *
-    /// 350/480) on the original EGA. We honour that so circles look round.
-    public func drawCircle(cx: Int, cy: Int, radius: Int, color: UInt8, state: RIPGraphicsState) {
-        // The spec defines 350/480 as the ratio; many implementations
-        // simplify to 7/10 which gives identical pixels for small radii.
-        let yrad = (radius * 7 + 5) / 10
-        drawEllipse(cx: cx, cy: cy, xrad: radius, yrad: yrad, color: color, state: state)
-    }
-
-    public func fillEllipse(cx: Int, cy: Int, xrad: Int, yrad: Int, state: RIPGraphicsState) {
-        guard xrad > 0 && yrad > 0 else { return }
-        let a2 = xrad * xrad
-        let b2 = yrad * yrad
-        for dy in -yrad...yrad {
-            let ratio = Double(dy * dy) / Double(b2)
-            if ratio > 1 { continue }
-            let dxF = Double(a2) * (1.0 - ratio)
-            let dx = Int(dxF.squareRoot().rounded())
-            let y = cy + dy
-            let xs = cx - dx
-            let xe = cx + dx
-            for x in xs...xe {
-                let c = patternColor(at: x, y: y, state: state)
-                setPixel(x: x, y: y, color: c, state: state)
-            }
-        }
-        drawEllipse(cx: cx, cy: cy, xrad: xrad, yrad: yrad, color: state.drawColor, state: state)
-    }
-
-    private func plotEllipsePoints(cx: Int, cy: Int, x: Int, y: Int, color: UInt8, state: RIPGraphicsState) {
-        setPixel(x: cx + x, y: cy + y, color: color, state: state)
-        setPixel(x: cx - x, y: cy + y, color: color, state: state)
-        setPixel(x: cx + x, y: cy - y, color: color, state: state)
-        setPixel(x: cx - x, y: cy - y, color: color, state: state)
-    }
-
-    // MARK: - Arc / pie
-
-    /// Arc/pie samples in polar space and plots line segments — good enough
-    /// for the small radii typical of RIPscrip scenes. Angles per the spec
-    /// are 0..360 with 0 east, 90 north (counter-clockwise).
-    public func drawArc(cx: Int, cy: Int, xrad: Int, yrad: Int, startAngle: Int, endAngle: Int, color: UInt8, state: RIPGraphicsState) {
-        let pts = arcPoints(cx: cx, cy: cy, xrad: xrad, yrad: yrad, startAngle: startAngle, endAngle: endAngle)
-        guard pts.count >= 2 else { return }
-        for i in 0..<(pts.count - 1) {
-            drawLine(x0: pts[i].x, y0: pts[i].y, x1: pts[i + 1].x, y1: pts[i + 1].y, color: color, state: state)
-        }
-    }
-
-    public func drawPieSlice(cx: Int, cy: Int, xrad: Int, yrad: Int, startAngle: Int, endAngle: Int, state: RIPGraphicsState) {
-        var pts = arcPoints(cx: cx, cy: cy, xrad: xrad, yrad: yrad, startAngle: startAngle, endAngle: endAngle)
-        pts.insert(RIPPoint(x: cx, y: cy), at: 0)
-        pts.append(RIPPoint(x: cx, y: cy))
-        fillPolygon(points: pts, state: state)
-    }
-
-    private func arcPoints(cx: Int, cy: Int, xrad: Int, yrad: Int, startAngle: Int, endAngle: Int) -> [RIPPoint] {
-        let s = Double(startAngle) * .pi / 180.0
-        var e = Double(endAngle) * .pi / 180.0
-        if e < s { e += 2 * .pi }
-        let arcLen = e - s
-        let steps = max(8, Int(arcLen * Double(max(xrad, yrad)) / 2.0))
-        var pts: [RIPPoint] = []
-        pts.reserveCapacity(steps + 1)
-        for i in 0...steps {
-            let t = s + arcLen * Double(i) / Double(steps)
-            let x = cx + Int((Double(xrad) * cos(t)).rounded())
-            // RIPscrip Y grows downward but angles are CCW math-convention,
-            // so we negate sin to flip Y.
-            let y = cy - Int((Double(yrad) * sin(t)).rounded())
-            pts.append(RIPPoint(x: x, y: y))
-        }
-        return pts
-    }
-
-    // MARK: - Bezier
-
-    /// Cubic Bezier with explicit segment count (spec `Z` command).
-    public func drawBezier(_ p0: RIPPoint, _ p1: RIPPoint, _ p2: RIPPoint, _ p3: RIPPoint, segments: Int, color: UInt8, state: RIPGraphicsState) {
-        let n = max(2, segments)
-        var prev = p0
-        for i in 1...n {
-            let t = Double(i) / Double(n)
-            let u = 1.0 - t
-            let xF = u*u*u * Double(p0.x) + 3 * u*u*t * Double(p1.x) + 3 * u*t*t * Double(p2.x) + t*t*t * Double(p3.x)
-            let yF = u*u*u * Double(p0.y) + 3 * u*u*t * Double(p1.y) + 3 * u*t*t * Double(p2.y) + t*t*t * Double(p3.y)
-            let cur = RIPPoint(x: Int(xF.rounded()), y: Int(yF.rounded()))
-            drawLine(x0: prev.x, y0: prev.y, x1: cur.x, y1: cur.y, color: color, state: state)
-            prev = cur
         }
     }
 
     // MARK: - Flood fill
 
-    /// Boundary-fill per spec. Plots the current fill pattern; will not
-    /// paint the border color and will not fill at all if the start pixel is
-    /// already the border color.
-    public func floodFill(x: Int, y: Int, border: UInt8, state: RIPGraphicsState) {
-        guard (0..<width).contains(x), (0..<height).contains(y) else { return }
-        let clip = state.viewport.clipRect()
-        if x < clip.x0 || x > clip.x1 || y < clip.y0 || y > clip.y1 { return }
-        if rawIndex(x: x, y: y) == border { return }
+    /// Border flood fill (4-connected, scanline, copy mode). Pixels inside
+    /// `clip` that are reachable from `(x, y)` without crossing `border`
+    /// are painted with `fill`. Each pixel is visited at most once, so the
+    /// work is bounded by the clip area regardless of the pattern colors.
+    func floodFill(x: Int, y: Int, border: UInt8, fill: FillSpec, clip: ClipRect) {
+        guard clip.contains(x, y), index(x: x, y: y) != border else { return }
+        if stamps.count != indexed.count {
+            stamps = [UInt32](repeating: 0, count: indexed.count)
+            stampGeneration = 0
+        }
+        if stampGeneration == UInt32.max {
+            for i in stamps.indices { stamps[i] = 0 }
+            stampGeneration = 0
+        }
+        stampGeneration += 1
+        let gen = stampGeneration
+
+        @inline(__always) func fillable(_ px: Int, _ py: Int) -> Bool {
+            let i = py * width + px
+            return stamps[i] != gen && indexed[i] != border
+        }
 
         var stack: [(Int, Int)] = [(x, y)]
-        // Track painted pixels so the loop terminates regardless of what the
-        // fill pattern actually plots (pattern may plot the border color
-        // itself, which would otherwise cause re-entry).
-        var visited = [Bool](repeating: false, count: width * height)
-        while let (px, py) = stack.popLast() {
-            if px < clip.x0 || px > clip.x1 || py < clip.y0 || py > clip.y1 { continue }
-            let i = py * width + px
-            if visited[i] { continue }
-            if indexed[i] == border { continue }
-            visited[i] = true
-            let c = patternColor(at: px, y: py, state: state)
-            // Bypass setPixel's redundant clip + write-mode XOR (fill is
-            // always copy per spec).
-            indexed[i] = c
-            writeRGBA(i, color: c)
-            stack.append((px + 1, py))
-            stack.append((px - 1, py))
-            stack.append((px, py + 1))
-            stack.append((px, py - 1))
+        while let (sx, sy) = stack.popLast() {
+            guard fillable(sx, sy) else { continue }
+            var left = sx
+            while left - 1 >= clip.x0, fillable(left - 1, sy) { left -= 1 }
+            var right = sx
+            while right + 1 <= clip.x1, fillable(right + 1, sy) { right += 1 }
+            let base = sy * width
+            for px in left...right {
+                stamps[base + px] = gen
+                indexed[base + px] = fill.color(atX: px, y: sy)
+            }
+            pixelWrites += right - left + 1
+            for ny in [sy - 1, sy + 1] where ny >= clip.y0 && ny <= clip.y1 {
+                var px = left
+                while px <= right {
+                    if fillable(px, ny) {
+                        stack.append((px, ny))
+                        while px <= right, fillable(px, ny) { px += 1 }
+                    } else {
+                        px += 1
+                    }
+                }
+            }
         }
     }
 
-    // MARK: - CGImage snapshot
+    // MARK: - Blocks
 
-    /// Snapshot the current framebuffer as a `CGImage`. Always premultiplied
-    /// RGBA8 in sRGB.
-    public func cgImage() -> CGImage? {
-        let bytesPerRow = width * 4
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
-        return CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo,
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: false,
-            intent: .defaultIntent
-        )
+    /// Copy a rectangle of palette indexes (inclusive, must be on-screen).
+    func copyBlock(x0: Int, y0: Int, x1: Int, y1: Int) -> ClipImage {
+        let w = x1 - x0 + 1, h = y1 - y0 + 1
+        var pixels: [UInt8] = []
+        pixels.reserveCapacity(w * h)
+        for y in y0...y1 {
+            let base = y * width
+            pixels.append(contentsOf: indexed[(base + x0)...(base + x1)])
+        }
+        return ClipImage(width: w, height: h, pixels: pixels)
     }
+
+    /// Paste a block at `(x, y)` combining with `mode` (0 copy, 1 XOR,
+    /// 2 OR, 3 AND, 4 NOT), clipped to `clip`.
+    func paste(_ image: ClipImage, x: Int, y: Int, mode: Int, clip: ClipRect) {
+        let r = ClipRect(x0: x, y0: y, x1: x + image.width - 1, y1: y + image.height - 1).intersection(clip)
+        guard !r.isEmpty else { return }
+        for py in r.y0...r.y1 {
+            let src = (py - y) * image.width
+            let dst = py * width
+            for px in r.x0...r.x1 {
+                let s = image.pixels[src + px - x]
+                let d = indexed[dst + px]
+                let v: UInt8
+                switch mode {
+                case 1: v = d ^ s
+                case 2: v = d | s
+                case 3: v = d & s
+                case 4: v = ~s
+                default: v = s
+                }
+                indexed[dst + px] = v & 0x0F
+            }
+        }
+        pixelWrites += (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1)
+    }
+}
+
+/// A palette-indexed bitmap (the RIPscrip clipboard).
+struct ClipImage: Equatable {
+    let width: Int
+    let height: Int
+    let pixels: [UInt8]
 }

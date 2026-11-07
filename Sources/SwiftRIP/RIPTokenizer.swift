@@ -1,247 +1,193 @@
-// RIPTokenizer — turn a raw RIPscrip stream into a flat list of
-// logical-line segments, each carrying one or more concatenated commands.
+// RIPTokenizer — split a raw RIPscrip stream into logical RIPscrip lines.
 //
-// Stage 1 (logical-line assembly):
-//   * Detect a RIP start marker at the beginning of a physical line:
-//       - `!|`           (canonical)
-//       - `SOH |`        (0x01 7C)         — allowed at any column
-//       - `STX !|`       (0x02 21 7C)      — allowed at any column
-//   * Handle line continuation: an *unescaped* trailing `\` immediately
-//     before CR / LF / CRLF folds the next physical line into the same
-//     logical command line.
-//   * Honor the literal-EOL gotcha from the v1.54 spec: a triple-backslash
-//     run at end of line means "literal `\` + continuation"; a run of `N`
-//     trailing backslashes contributes `N/2` literal `\` characters, with
-//     a continuation iff `N` is odd.
-//   * Out-of-frame ANSI auto-sense escape sequences (`ESC[!`, `ESC[0!`,
-//     `ESC[1!`, `ESC[2!`) are recognized and surfaced separately.
+// Rules implemented (RIPscrip 1.54, "General Structure"):
 //
-// The tokenizer's contract: produce one `RIPToken` per RIP-line. The parser
-// walks the payload using per-command spec grammar to split fixed-width
-// commands and consume variable-length text payloads at the next unescaped
-// `|`.
+//   * A RIPscrip line starts with `!|` at the beginning of a physical line
+//     (rule 1/2). `!|` in the middle of a line is literal text.
+//   * `SOH |` (0x01 0x7C) and `STX |` (0x02 0x7C) start a RIPscrip line in
+//     any column (rule 12). `STX !|` is tolerated as well.
+//   * A run of N backslashes immediately before CR / LF / CRLF contributes
+//     N/2 literal (still escaped) backslash pairs and, when N is odd, folds
+//     the next physical line into the same logical line (rules 5 and 13).
+//   * ANSI auto-sense sequences (`ESC[!`, `ESC[0!`, `ESC[1!`, `ESC[2!`)
+//     outside RIPscrip lines are reported; `ESC[1!` disables RIPscrip
+//     processing (subsequent `!|` lines are plain text) until `ESC[2!`.
 //
-// The tokenizer operates on `Unicode.Scalar` (not `Character`) so that CRLF
-// is treated as two distinct codepoints rather than a single extended
-// grapheme cluster — RIPscrip is fundamentally a byte stream and the
-// grapheme view would silently merge `\r\n` into one element.
+// Everything that is not part of a RIPscrip line (plain ASCII / ANSI text)
+// is skipped: SwiftRIP does not emulate the TTY text window.
+//
+// The tokenizer works on Unicode scalars so CRLF is two elements. `Data`
+// input is decoded as ISO-8859-1 (one scalar per byte), so scalar offsets
+// are byte offsets and no byte sequence is ever rejected or replaced.
 
 import Foundation
 
-/// A single RIP-line segment after tokenization. Contains one logical
-/// `!|...` line's worth of command payload, with continuations folded and
-/// the leading start marker stripped.
-public struct RIPToken: Equatable, Sendable {
-    /// Raw payload — everything after the start marker, after continuation
-    /// folding and start-marker stripping. Escape sequences (`\!`, `\|`,
-    /// `\\`) are preserved as two-character sequences; per-command
-    /// argument decoders un-escape them in text fields.
-    public let payload: String
-    /// Codepoint offset in the original input where this line began.
-    public let offset: Int
-
-    public init(payload: String, offset: Int) {
-        self.payload = payload
-        self.offset = offset
-    }
+/// One logical RIPscrip line: the payload after the start marker with
+/// continuations folded. Escape sequences (`\!`, `\|`, `\\`) are preserved
+/// so the parser can still distinguish delimiters from literal characters.
+struct RIPToken: Equatable, Sendable {
+    /// Payload after the start marker (the marker's `|` is the first
+    /// command delimiter and is not included).
+    let payload: String
+    /// Scalar offset of the start marker in the input.
+    let offset: Int
 }
 
-/// Tokenization step output: RIP-line tokens plus any ANSI auto-sense
-/// escape sequences encountered outside RIP frames.
-public struct RIPTokenStream: Equatable, Sendable {
-    public let tokens: [RIPToken]
-    public let ansiSenses: [RIPAnsiSenseHit]
-
-    public init(tokens: [RIPToken], ansiSenses: [RIPAnsiSenseHit] = []) {
-        self.tokens = tokens
-        self.ansiSenses = ansiSenses
-    }
-}
-
-/// One ANSI auto-sense escape sequence hit, with its source-stream offset.
-public struct RIPAnsiSenseHit: Equatable, Sendable {
-    public let offset: Int
-    public let sense: RIPAnsiSense
-
-    public init(offset: Int, sense: RIPAnsiSense) {
-        self.offset = offset
-        self.sense = sense
-    }
+/// Tokenizer output: RIPscrip lines plus out-of-band ANSI auto-sense hits.
+struct RIPTokenStream: Equatable, Sendable {
+    let tokens: [RIPToken]
+    let ansiSenses: [RIPAnsiSenseHit]
 }
 
 /// Stateless RIPscrip lexical analyzer.
-public enum RIPTokenizer {
+enum RIPTokenizer {
 
-    private static let soh: Unicode.Scalar = Unicode.Scalar(0x01)!
-    private static let stx: Unicode.Scalar = Unicode.Scalar(0x02)!
-    private static let esc: Unicode.Scalar = Unicode.Scalar(0x1B)!
-    private static let cr: Unicode.Scalar  = Unicode.Scalar(0x0D)!
-    private static let lf: Unicode.Scalar  = Unicode.Scalar(0x0A)!
-    private static let bang: Unicode.Scalar = Unicode.Scalar(0x21)! // !
-    private static let pipe: Unicode.Scalar = Unicode.Scalar(0x7C)! // |
-    private static let bs: Unicode.Scalar   = Unicode.Scalar(0x5C)! // \
-    private static let lbr: Unicode.Scalar  = Unicode.Scalar(0x5B)! // [
+    static let soh: Unicode.Scalar = "\u{01}"
+    static let stx: Unicode.Scalar = "\u{02}"
+    static let esc: Unicode.Scalar = "\u{1B}"
+    static let cr: Unicode.Scalar = "\r"
+    static let lf: Unicode.Scalar = "\n"
+    static let bang: Unicode.Scalar = "!"
+    static let pipe: Unicode.Scalar = "|"
+    static let backslash: Unicode.Scalar = "\\"
+    static let leftBracket: Unicode.Scalar = "["
 
-    /// Tokenize a UTF-8 encoded Data buffer.
-    public static func tokenize(_ data: Data) -> RIPTokenStream {
-        let text = String(decoding: data, as: UTF8.self)
-        return tokenize(text)
+    /// Decode bytes as ISO-8859-1: every byte becomes the scalar with the
+    /// same value. Never fails.
+    static func scalars(from data: Data) -> [Unicode.Scalar] {
+        data.map { Unicode.Scalar($0) }
     }
 
-    /// Tokenize a Swift String. Linebreaks are accepted as CRLF, LF, or CR.
-    public static func tokenize(_ text: String) -> RIPTokenStream {
+    /// Tokenize a byte buffer (decoded as ISO-8859-1).
+    static func tokenize(_ data: Data) -> RIPTokenStream {
+        tokenize(scalars: scalars(from: data))
+    }
+
+    /// Tokenize a string.
+    static func tokenize(_ text: String) -> RIPTokenStream {
+        tokenize(scalars: Array(text.unicodeScalars))
+    }
+
+    /// Tokenize a scalar buffer.
+    static func tokenize(scalars: [Unicode.Scalar]) -> RIPTokenStream {
         var tokens: [RIPToken] = []
         var ansi: [RIPAnsiSenseHit] = []
-
-        let scalars = Array(text.unicodeScalars)
-        var i = 0
         let n = scalars.count
+        var i = 0
+        var atLineStart = true
+        var ripEnabled = true
 
         while i < n {
-            // ANSI auto-sense sequences live OUTSIDE the !| frame.
-            if scalars[i] == Self.esc, i + 2 < n, scalars[i + 1] == Self.lbr {
-                if scalars[i + 2] == Self.bang {
-                    ansi.append(RIPAnsiSenseHit(offset: i, sense: .query))
-                    i += 3
-                    continue
-                }
-                if i + 3 < n, scalars[i + 3] == Self.bang {
-                    switch scalars[i + 2] {
-                    case "0":
-                        ansi.append(RIPAnsiSenseHit(offset: i, sense: .enable))
-                        i += 4
-                        continue
-                    case "1":
-                        ansi.append(RIPAnsiSenseHit(offset: i, sense: .enable2x))
-                        i += 4
-                        continue
-                    case "2":
-                        ansi.append(RIPAnsiSenseHit(offset: i, sense: .disable))
-                        i += 4
-                        continue
-                    default:
-                        break
-                    }
-                }
-            }
+            let s = scalars[i]
 
-            // Detect a RIP start marker.
-            let markerLen = matchStartMarker(scalars, at: i)
-            if markerLen > 0 {
-                let segStart = i + markerLen
-                let (payload, consumed) = assembleLogicalLine(scalars, from: segStart)
-                tokens.append(RIPToken(payload: payload, offset: i))
-                i = segStart + consumed
+            if s == esc, let (sense, length) = matchAnsiSense(scalars, at: i) {
+                ansi.append(RIPAnsiSenseHit(offset: i, sense: sense))
+                switch sense {
+                case .disable: ripEnabled = false
+                case .enable: ripEnabled = true
+                case .query, .queryAlternate: break
+                }
+                i += length
+                atLineStart = false
                 continue
             }
 
+            if ripEnabled {
+                let markerLength = matchStartMarker(scalars, at: i, atLineStart: atLineStart)
+                if markerLength > 0 {
+                    let start = i + markerLength
+                    let (payload, consumed) = assembleLogicalLine(scalars, from: start)
+                    tokens.append(RIPToken(payload: payload, offset: i))
+                    i = start + consumed
+                    atLineStart = true
+                    continue
+                }
+            }
+
+            atLineStart = (s == cr || s == lf)
             i += 1
         }
-
         return RIPTokenStream(tokens: tokens, ansiSenses: ansi)
+    }
+
+    // MARK: - ANSI auto-sense
+
+    /// Match `ESC[!`, `ESC[0!`, `ESC[1!` or `ESC[2!` at `i`.
+    static func matchAnsiSense(_ scalars: [Unicode.Scalar], at i: Int) -> (RIPAnsiSense, Int)? {
+        let n = scalars.count
+        guard i + 2 < n, scalars[i] == esc, scalars[i + 1] == leftBracket else { return nil }
+        if scalars[i + 2] == bang { return (.query, 3) }
+        guard i + 3 < n, scalars[i + 3] == bang else { return nil }
+        switch scalars[i + 2] {
+        case "0": return (.queryAlternate, 4)
+        case "1": return (.disable, 4)
+        case "2": return (.enable, 4)
+        default: return nil
+        }
     }
 
     // MARK: - Start marker
 
-    /// Returns the length of the matched RIP start marker, or 0 if none.
-    private static func matchStartMarker(_ scalars: [Unicode.Scalar], at i: Int) -> Int {
+    /// Length of the RIPscrip start marker at `i`, or 0 if there is none.
+    private static func matchStartMarker(_ scalars: [Unicode.Scalar], at i: Int, atLineStart: Bool) -> Int {
         let n = scalars.count
-        // `!|`
-        if i + 1 < n, scalars[i] == Self.bang, scalars[i + 1] == Self.pipe {
-            if i == 0 || scalars[i - 1] != Self.bs {
-                return 2
-            }
-        }
-        // `SOH |`
-        if i + 1 < n, scalars[i] == Self.soh, scalars[i + 1] == Self.pipe {
+        guard i + 1 < n else { return 0 }
+        let s = scalars[i]
+        if (s == soh || s == stx), scalars[i + 1] == pipe {
             return 2
         }
-        // `STX !|`
-        if i + 2 < n, scalars[i] == Self.stx, scalars[i + 1] == Self.bang, scalars[i + 2] == Self.pipe {
+        if s == stx, i + 2 < n, scalars[i + 1] == bang, scalars[i + 2] == pipe {
             return 3
+        }
+        if atLineStart, s == bang, scalars[i + 1] == pipe {
+            return 2
         }
         return 0
     }
 
     // MARK: - Logical-line assembly
 
-    /// Reads forward from `start` through to a real (non-continuation) line
-    /// break. Returns the assembled logical-line payload and the number of
-    /// input scalars consumed (including the terminator).
+    /// Read from `start` to the first real (non-continuation) line break.
+    /// Returns the folded payload and the number of scalars consumed,
+    /// including the terminating line break.
     private static func assembleLogicalLine(_ scalars: [Unicode.Scalar], from start: Int) -> (String, Int) {
-        var out: [Unicode.Scalar] = []
-        var i = start
+        var out = String.UnicodeScalarView()
         let n = scalars.count
+        var i = start
+
+        func lineBreakLength(at j: Int) -> Int {
+            if scalars[j] == cr, j + 1 < n, scalars[j + 1] == lf { return 2 }
+            return 1
+        }
 
         while i < n {
             let s = scalars[i]
-
-            if s == Self.bs {
-                // Count consecutive backslashes.
+            if s == backslash {
                 var run = 0
-                while i + run < n, scalars[i + run] == Self.bs {
-                    run += 1
+                while i + run < n, scalars[i + run] == backslash { run += 1 }
+                let after = i + run
+                if after < n, scalars[after] == cr || scalars[after] == lf {
+                    // N trailing backslashes: N/2 escaped literals, plus a
+                    // continuation when N is odd.
+                    for _ in 0..<(run / 2) {
+                        out.append(backslash)
+                        out.append(backslash)
+                    }
+                    i = after + lineBreakLength(at: after)
+                    if run % 2 == 1 { continue }
+                    return (String(out), i - start)
                 }
-                let afterRun = i + run
-                if afterRun < n, isLineBreak(scalars[afterRun]) {
-                    // A run of N trailing backslashes at EOL:
-                    //   * N odd:  floor(N/2) literal `\` (each as `\\`) + continuation.
-                    //   * N even: N/2 literal `\` (each as `\\`) + REAL line break.
-                    let literals = run / 2
-                    let continues = (run % 2 == 1)
-                    for _ in 0..<literals {
-                        // Preserve as an escaped literal so the per-command
-                        // text-payload decoder sees `\\` and un-escapes it.
-                        out.append(Self.bs)
-                        out.append(Self.bs)
-                    }
-                    if continues {
-                        i = afterRun
-                        if scalars[i] == Self.cr, i + 1 < n, scalars[i + 1] == Self.lf {
-                            i += 2
-                        } else {
-                            i += 1
-                        }
-                        continue
-                    } else {
-                        i = afterRun
-                        if scalars[i] == Self.cr, i + 1 < n, scalars[i + 1] == Self.lf {
-                            return (string(from: out), (i + 2) - start)
-                        }
-                        return (string(from: out), (i + 1) - start)
-                    }
-                } else {
-                    for _ in 0..<run {
-                        out.append(Self.bs)
-                    }
-                    i = afterRun
-                    continue
-                }
+                for _ in 0..<run { out.append(backslash) }
+                i = after
+                continue
             }
-
-            if isLineBreak(s) {
-                if s == Self.cr, i + 1 < n, scalars[i + 1] == Self.lf {
-                    return (string(from: out), (i + 2) - start)
-                }
-                return (string(from: out), (i + 1) - start)
+            if s == cr || s == lf {
+                i += lineBreakLength(at: i)
+                return (String(out), i - start)
             }
-
             out.append(s)
             i += 1
         }
-        // EOF without a terminator.
-        return (string(from: out), i - start)
-    }
-
-    @inline(__always)
-    private static func isLineBreak(_ s: Unicode.Scalar) -> Bool {
-        s == Self.cr || s == Self.lf
-    }
-
-    @inline(__always)
-    private static func string(from scalars: [Unicode.Scalar]) -> String {
-        var v = String.UnicodeScalarView()
-        v.append(contentsOf: scalars)
-        return String(v)
+        return (String(out), i - start)
     }
 }
