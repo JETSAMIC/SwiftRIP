@@ -6,12 +6,14 @@
 // and dynamic sizing, the bevel, recessed, sunken and chisel effects (chisel
 // insets from the spec's table), label orientation (above / left / center /
 // right / below), left/right label justification, label drop shadow and the
-// mouse-button hit region.
+// mouse-button hit region, and auto-stamp ("auto-clip": the first button's
+// image, effects included but recess and label excluded, replaces the
+// clipboard and the style becomes a plain clipboard-button style).
 //
 // Not supported: icon images (icon buttons get effects and label around
 // the RIP_BUTTON rectangle but no image — SwiftRIP does not read `.ICN`
-// files), hot-icons, hot-key underline/highlight, the "selected" and
-// auto-stamp states, radio / check-box behaviour and the explode effect.
+// files), hot-icons, hot-key underline/highlight, the "selected" state,
+// radio / check-box behaviour and the explode effect.
 // Effect geometry and label spacing approximate RIPterm.
 
 import Foundation
@@ -34,8 +36,23 @@ extension RIPInterpreter {
         }
     }
 
+    /// The style that RIPscrip 1.54 leaves in effect after an auto-stamp
+    /// (flag 64) button: icon and plain become clipboard, and the chisel,
+    /// bevel, auto-stamp and sunken flags are cleared.
+    static func styleAfterAutoStamp(_ style: RIPButtonStyle) -> RIPButtonStyle {
+        typealias F = RIPButtonStyle.Flag
+        var next = style
+        let cleared = F.icon | F.plain | F.chisel | F.bevel | F.autoStamp | F.sunken
+        next.flags = (style.flags & ~cleared) | F.clipboard
+        return next
+    }
+
+    /// Draw one button. Returns `true` when the button auto-stamped its
+    /// image onto the clipboard, so the caller must switch the current style
+    /// to ``styleAfterAutoStamp(_:)``.
+    @discardableResult
     func drawButton(x0: Int, y0: Int, x1: Int, y1: Int, hotkey: Int, flags: Int,
-                    text: RIPButtonText, style: RIPButtonStyle, clip: ClipRect) {
+                    text: RIPButtonText, style: RIPButtonStyle, clip: ClipRect) -> Bool {
         typealias F = RIPButtonStyle.Flag
         let f = style.flags
         let (ax, ay) = absolute(x0, y0, in: clip)
@@ -43,7 +60,7 @@ extension RIPInterpreter {
         // Base image.
         var base: ClipRect
         if f & F.clipboard != 0 {
-            guard let image = clipboard else { return }
+            guard let image = clipboard else { return false }
             base = ClipRect(x0: ax, y0: ay, x1: ax + image.width - 1, y1: ay + image.height - 1)
             canvas.paste(image, x: ax, y: ay, mode: 0, clip: clip)
         } else {
@@ -109,6 +126,19 @@ extension RIPInterpreter {
             }
         }
         let hitRect = outer
+
+        // Auto-stamp: the image so far (base plus effects, without the
+        // recess, which is never part of the button, and before the label)
+        // replaces the clipboard.
+        var stamped = false
+        if f & F.autoStamp != 0 {
+            let r = hitRect.intersection(canvas.screen)
+            if !r.isEmpty {
+                clipboard = canvas.copyBlock(x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1)
+                stamped = true
+            }
+        }
+
         if f & F.recessed != 0 {
             ring(outer, 1, topLeft: 0, bottomRight: 0)
             ring(outer, 2, topLeft: dark, bottomRight: bright)
@@ -155,5 +185,6 @@ extension RIPInterpreter {
                                           invertsWhenClicked: f & F.invertable != 0,
                                           resetsOnClick: f & F.resetScreen != 0, hotkey: hotkey))
         }
+        return stamped
     }
 }

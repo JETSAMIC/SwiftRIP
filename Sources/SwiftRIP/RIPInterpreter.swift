@@ -10,7 +10,8 @@
 //     spec says they apply and line thickness 1/3.
 //   * Erase window / erase view / erase EOL / reset windows as pixel clears.
 //   * Level 1 text regions, GET_IMAGE / PUT_IMAGE clipboard, COPY_REGION and
-//     buttons (plain and clipboard buttons with their special effects).
+//     buttons (plain and clipboard buttons with their special effects and
+//     auto-stamp).
 //
 // What is recorded but not executed (no host, no file system): mouse
 // fields and mouse buttons (as hit regions), LOAD_ICON, WRITE_ICON,
@@ -402,8 +403,10 @@ final class RIPInterpreter {
 
         case let .button(x0, y0, x1, y1, hotkey, flags, _, text):
             guard let clip = viewportClip, let style = state.buttonStyle else { return }
-            drawButton(x0: x0, y0: y0, x1: x1, y1: y1, hotkey: hotkey, flags: flags,
-                       text: RIPButtonText(parsing: text), style: style, clip: clip)
+            if drawButton(x0: x0, y0: y0, x1: x1, y1: y1, hotkey: hotkey, flags: flags,
+                          text: RIPButtonText(parsing: text), style: style, clip: clip) {
+                state.buttonStyle = Self.styleAfterAutoStamp(style)
+            }
 
         case let .mouse(_, x0, y0, x1, y1, click, clear, _, host):
             guard let clip = viewportClip else { return }

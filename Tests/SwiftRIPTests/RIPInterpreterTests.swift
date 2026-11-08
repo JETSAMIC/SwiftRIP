@@ -369,6 +369,36 @@ final class RIPInterpreterTests: XCTestCase {
             invertsWhenClicked: false, resetsOnClick: false, hotkey: 79)])
     }
 
+    /// RIPscrip 1.54, RIP_BUTTON_STYLE flag 64 ("auto-stamp image onto
+    /// clipboard"): the first button's image including its effects, but
+    /// without the recess and the label, replaces the clipboard; the style
+    /// then becomes a clipboard-button style with icon, plain, chisel, bevel,
+    /// auto-stamp and sunken cleared.
+    func testAutoStampButtonReplacesClipboardAndStyle() {
+        typealias F = RIPButtonStyle.Flag
+        let style = RIPButtonStyle(width: 0, height: 0, orientation: 2,
+                                   flags: F.plain | F.bevel | F.autoStamp | F.mouseButton | F.recessed,
+                                   bevelSize: 2, labelColor: 1, dropShadowColor: 0, brightColor: 15, darkColor: 8,
+                                   surfaceColor: 7, groupNumber: 0, flags2: 0, underlineColor: 0, cornerColor: 0, reserved: 0)
+        let r = execute([.buttonStyle(style),
+                         .button(x0: 100, y0: 100, x1: 130, y1: 115, hotkey: 65, flags: 0, reserved: 0, text: "<>A<>a"),
+                         .button(x0: 200, y0: 200, x1: 0, y1: 0, hotkey: 66, flags: 0, reserved: 0, text: "<><>b")])
+        XCTAssertEqual(r.state.buttonStyle?.flags, F.clipboard | F.mouseButton | F.recessed)
+
+        // The stamp is the 35x20 bevelled image (31x16 base plus 2 pixels of
+        // bevel on each side); the second button is that image at (200, 200).
+        XCTAssertEqual(r.clipboard?.width, 35)
+        XCTAssertEqual(r.clipboard?.height, 20)
+        XCTAssertEqual(r.px(200, 200), 15, "bright bevel corner")
+        XCTAssertEqual(r.px(205, 205), 7, "surface")
+        XCTAssertEqual(r.px(199, 210), 0, "recess: black outline outside the stamped image")
+        XCTAssertEqual(r.px(198, 210), 8, "recess: inverted bevel (dark on the left)")
+        for y in 202..<218 { for x in 202..<233 { XCTAssertNotEqual(r.px(x, y), 1, "label is not stamped") } }
+        XCTAssertEqual(r.interactive.mouseRegions.last, RIPMouseRegion(
+            kind: .button, x0: 200, y0: 200, x1: 234, y1: 219, hostCommand: "b",
+            invertsWhenClicked: false, resetsOnClick: false, hotkey: 66))
+    }
+
     func testButtonWithoutStyleIsIgnored() {
         let r = execute([.button(x0: 1, y0: 1, x1: 9, y1: 9, hotkey: 0, flags: 0, reserved: 0, text: "<>x")])
         XCTAssertEqual(count(r, 0), 640 * 350)

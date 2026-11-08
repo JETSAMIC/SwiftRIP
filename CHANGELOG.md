@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write modes, line styles and thickness, 12 fill patterns plus custom
   patterns, flood fill, aspect-corrected circles / arcs / pie slices,
   Beziers, polygons, text with the bitmap and stroke fonts, text regions,
-  clipboard get / put / copy region, and plain / clipboard buttons.
+  clipboard get / put / copy region, and plain / clipboard buttons
+  (including auto-stamp onto the clipboard).
 - `RIPRenderResult` with the final `RIPGraphicsState` and
   `RIPSceneInteractive` (mouse regions in global coordinates and the
   non-graphical commands).
