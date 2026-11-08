@@ -70,9 +70,9 @@ Against the RIPscrip 1.54 specification (TeleGrafix, July 1993). "Parsed" means 
 | Fonts: 8x8 bitmap + 10 stroke fonts, direction, size 1-10, drawing-position update | Partial — clean-room glyph approximations, not BGI glyph shapes or metrics; ASCII 32-126 only |
 | Text regions `1T` / `1t` / `1E` with justification | Supported |
 | Clipboard `1C` get image, `1P` put image (copy / XOR / OR / AND / NOT), `1G` copy region | Supported |
-| Buttons `1B` / `1U` | Partial — plain and clipboard buttons, bevel / recess / sunken / chisel, label placement and drop shadow, mouse region; no icon images, hot-key underline, selected state, radio / check-box behaviour |
+| Buttons `1B` / `1U` | Partial — plain and clipboard buttons, bevel / recess / sunken / chisel, auto-stamp, label placement, justification and drop shadow, mouse region; no icon images, hot icons, hot-key underline / highlight, selected / default state, radio / check-box behaviour, explode |
 | Mouse fields `1M` / `1K` | Recorded as `RIPMouseRegion`s (global coordinates, 128 limit) |
-| Icons `1I` / `1W`, `.ICN` files | Parsed and recorded only |
+| Icons `1I` / `1W`, `.ICN` files | Parsed and recorded only (no `.ICN` reader / writer) |
 | `1D` define, `1<ESC>` query, `1R` read scene, `1F` file query, `9<ESC>` block mode, `#` no more | Parsed and recorded only (no host / file system) |
 | Text variables, pick lists, host-command templates | Preserved verbatim in command text; not interpreted |
 | Raw ASCII / ANSI text outside RIPscrip lines | Skipped (no TTY emulation) |
@@ -83,11 +83,11 @@ Against the RIPscrip 1.54 specification (TeleGrafix, July 1993). "Parsed" means 
 - **No icons.** `.ICN` files are not read; `LOAD_ICON` draws nothing and icon buttons render without their image.
 - **No terminal.** SwiftRIP does not emulate the TTY text window, send host commands, answer queries or transfer files.
 - **Work budget.** `RIPRenderOptions.pixelBudget` (default 200 million work units — pixel writes plus off-screen rasterizer steps; about 900 full-screen flood fills, roughly 1.5 s on Apple silicon) stops hostile scripts; `RIPRenderResult.isTruncated` reports it. Set it to `nil` to disable.
-- Out-of-range argument values and spec errata are handled as documented in [`Reference/RIPscrip-Format.md`](Reference/RIPscrip-Format.md) §12.
+- Out-of-range argument values, unspecified behaviour and spec errata are handled as documented in [`Reference/RIPscrip-Format.md`](Reference/RIPscrip-Format.md) §6 and §8; §9 is the detailed implementation-status table.
 
 ## References
 
-- [`Reference/RIPscrip-Format.md`](Reference/RIPscrip-Format.md) — implementation reference checked against the 1.54 text.
+- [`Reference/RIPscrip-Format.md`](Reference/RIPscrip-Format.md) — the comprehensive RIPscrip 1.54 specification used by SwiftRIP: every command layout, enumeration tables, algorithms, de-facto behaviour, robustness guidance and errata.
 - *RIPscrip Graphics Protocol Specification*, Revision 1.54 (TeleGrafix Communications, Inc., 1993), and Revision 1.53 — archived in the JETSAMIC `specs` repository (`art/ripscrip-1.54.txt`, `art/ripscrip-1.53.md`, `art/ripscrip-1.54-template.txt`).
 
 SwiftRIP is implemented from the published specification; it contains no code or font data from RIPterm, RIPaint or Borland's BGI.
